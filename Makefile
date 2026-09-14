@@ -30,10 +30,13 @@ build: $(WEB_STAMP)
 build-debug: $(WEB_STAMP)
 	CGO_ENABLED=1 $(GO) build -tags debug -o bin/litepanel-debug ./cmd/litepanel
 
+# android/termux 不支持 -race；其余平台（包括真正的 Linux 服务器）带 -race。
+RACE := $(if $(filter android,$(shell $(GO) env GOOS)),,-race)
+
 test: test-go test-web
 
 test-go:
-	$(GO) test -race ./...
+	$(GO) test $(RACE) ./...
 
 test-web:
 	cd web && $(NPM) run test
