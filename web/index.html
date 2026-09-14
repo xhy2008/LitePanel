@@ -4,6 +4,65 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>LitePanel</title>
+    <script>
+      // 启动诊断钩子。必须在内联脚本里：入口模块若加载失败或解析期抛错，
+      // 模块内代码根本没机会运行。手机 Chrome 没有 DevTools，
+      // 不落页面就等于零线索。
+      //
+      // 两类症状要分开定性，处置完全不同：
+      //   1) 抛错  → 显示错误与栈
+      //   2) 卡住  → 看门狗超时，说明某个 await 永不 resolve
+      (function () {
+        var shown = false;
+        function show(title, text) {
+          if (shown) return;
+          var el = document.getElementById('app') || document.body;
+          if (!el) return;
+          shown = true;
+          el.textContent = '';
+          var box = document.createElement('pre');
+          box.setAttribute(
+            'style',
+            'padding:16px;font:12px/1.6 ui-monospace,monospace;color:#ff6b6b;' +
+              'white-space:pre-wrap;word-break:break-all;margin:0',
+          );
+          box.textContent = title + '\n\n' + text;
+          el.appendChild(box);
+        }
+        window.__litepanelFatal = function (e) {
+          var msg = e && e.message ? e.message : String(e);
+          show('LitePanel 启动失败', msg + '\n' + (e && e.stack ? e.stack : ''));
+        };
+
+        // 资源加载失败只在 capture 阶段可见。只认我们自己的 /assets/ 产物：
+        // 浏览器扩展或 Chrome 自己注入的脚本失败不是我们的故障，
+        // 误报会凭空造出一个白屏。
+        window.addEventListener(
+          'error',
+          function (ev) {
+            var t = ev && ev.target;
+            if (!t || t === window || !t.tagName) return;
+            var u = t.src || t.href || '';
+            if (!u || u.indexOf('/assets/') === -1) return;
+            show('LitePanel 资源加载失败', '<' + t.tagName + '> ' + u);
+          },
+          true,
+        );
+
+        // 看门狗：入口模块执行完后 main.ts 会置 ready。
+        // 超时未 ready = 不是报错而是卡住（典型症状：标题不变、无报错、白屏）。
+        window.__litepanelReady = false;
+        setTimeout(function () {
+          if (window.__litepanelReady || shown) return;
+          show(
+            'LitePanel 启动挂起（8s 未完成）',
+            '入口脚本已加载但没有挂载完成，说明某个 await 没有返回。\n' +
+              '请同时提供服务端 dev/litepanel.log：\n' +
+              '若日志里有 "→" 却没有对应的 "←"，就是那个请求挂住了。',
+          );
+        }, 8000);
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

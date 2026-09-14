@@ -28,12 +28,23 @@ type AuthDeps struct {
 	SessionTTL   time.Duration
 	SecureCookie bool
 	Hub          *ws.Hub
+
+	// Debug 打开逐请求访问日志（仅 dev 构建默认开启，见 cmd/litepanel）。
+	Debug bool
+	// LogWriter 是访问日志的去向；nil 则不记。测试注入 bytes.Buffer。
+	LogWriter io.Writer
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
 // deps.Sessions 为 nil 时 API 一律返回 501（仅用于早期骨架测试）。
 func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 	r := chi.NewRouter()
+
+	if deps.Debug && deps.LogWriter != nil {
+		r.Use(func(next http.Handler) http.Handler {
+			return accessLog(deps.LogWriter, next)
+		})
+	}
 
 	authed := func(h http.HandlerFunc) http.HandlerFunc { return requireAuth(deps)(h) }
 

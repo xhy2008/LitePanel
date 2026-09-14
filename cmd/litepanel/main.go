@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 func main() {
 	configPath := flag.String("config", defaultConfigPath(), "配置文件路径")
 	listenOverride := flag.String("listen", "", "覆盖配置中的监听地址（调试用）")
+	debug := flag.Bool("debug", false, "打印逐请求访问日志（排查浏览器白屏/请求挂起用）")
 	flag.Parse()
 
 	// 面板自身不写任何日志文件（D9）；stderr 交给 systemd/journald。
@@ -63,14 +65,7 @@ func main() {
 
 	addr := resolveListen(cfg, *listenOverride)
 	hub := ws.NewHub()
-	deps := api.AuthDeps{
-		DB:           db,
-		Hub:          hub,
-		Sessions:     auth.NewSessionStore(db, time.Now, 7*24*time.Hour),
-		Limiter:      auth.NewLoginLimiter(time.Now, 5, 10*time.Minute),
-		Clock:        time.Now,
-		SecureCookie: cfg.TLS.Enabled,
-	}
+	deps := buildDeps(db, cfg, hub, *debug, os.Stderr)
 
 	sub, err := webdist.Dist()
 	if err != nil {
@@ -100,6 +95,21 @@ func main() {
 }
 
 // resolveListen 实施 D7：默认只绑 tailscale 地址，探测不到则回落 127.0.0.1。
+// buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。
+func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io.Writer) api.AuthDeps {
+	return api.AuthDeps{
+		DB:       db,
+		Hub:      hub,
+		Sessions: auth.NewSessionStore(db, time.Now, 7*24*time.Hour),
+		// 设计 5.6：同一 IP 连续 5 次失败锁 10 分钟。
+		Limiter:      auth.NewLoginLimiter(time.Now, 5, 10*time.Minute),
+		Clock:        time.Now,
+		SecureCookie: cfg.TLS.Enabled,
+		Debug:        debug,
+		LogWriter:    logw,
+	}
+}
+
 func resolveListen(cfg config.Config, override string) string {
 	if override != "" {
 		return override
