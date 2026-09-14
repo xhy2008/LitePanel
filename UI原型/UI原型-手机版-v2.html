@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>
+!(function(j,a,g){j.__itrace_conf = {bid: 'f43basl8-6nqu7l3w',rel: '0.0.1', spa: true, uid: '', plugins:['jserror','interface','perf','resource','flow','blank']};var b = a.createElement("script");var d = a.getElementsByTagName("script")[0];b.type = "text/javascript";b.crossorigin = true;b.async = true;b.onload = function(){j.__itrace && j.__itrace.setReady()};d.parentNode.insertBefore(b,d);b.src = g})(window, document, "https://g.alicdn.com/woodpeckerx/itrace-next/itrace.iife.js")
+</script>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>轻量服务器管理面板 · 手机端原型 v2</title>
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<style>
+:root{
+  --theme-color:#FF6600;--theme-light:#ff8534;
+  --bg-color:#0e1116;--bg-elevated:#141920;--card-bg:#191f27;--card-bg-2:#202832;
+  --text-primary:#e6ebf2;--text-secondary:#95a2b4;--text-tertiary:#5f6c7f;
+  --border-color:#252e39;--border-soft:#1e252e;
+  --ok:#2ecc71;--warn:#f5a623;--danger:#ff4d4f;--info:#3ba7ff;
+  --radius-sm:8px;--radius-md:12px;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:#080a0d;color:var(--text-primary);line-height:1.45;-webkit-font-smoothing:antialiased;}
+.material-icons{font-size:20px;line-height:1;vertical-align:middle;}
+.app{max-width:375px;margin:0 auto;height:812px;background:var(--bg-color);position:relative;
+  overflow:hidden;display:flex;flex-direction:column;box-shadow:0 0 50px rgba(0,0,0,.6);}
+.dot{width:5px;height:5px;border-radius:50%;background:var(--ok);flex-shrink:0;}
+
+/* ===== 顶栏：下拉图标按钮 + 竖直进度条 ===== */
+.topbar{flex-shrink:0;background:var(--bg-elevated);border-bottom:1px solid var(--border-color);
+  padding:7px 8px;display:flex;align-items:center;gap:7px;position:relative;z-index:60;}
+.iconbtn{width:38px;height:44px;border-radius:9px;background:var(--card-bg-2);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--theme-color);flex-shrink:0;}
+.iconbtn:active{background:#2b3542;}
+.iconbtn .material-icons{font-size:20px;}
+.vbs{flex:1;display:flex;align-items:flex-end;gap:4px;min-width:0;overflow:hidden;}
+.vb{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;}
+.vb-v{font-size:9px;color:var(--text-secondary);font-variant-numeric:tabular-nums;line-height:1;}
+.vb-t{width:7px;height:26px;background:#212a35;border-radius:4px;position:relative;overflow:hidden;}
+.vb-f{position:absolute;bottom:0;left:0;right:0;border-radius:4px;transition:height .8s cubic-bezier(.4,0,.2,1);}
+.vb-n{font-size:8px;color:var(--text-tertiary);line-height:1;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:100%;}
+.vb-sep{width:1px;height:34px;background:var(--border-color);flex-shrink:0;margin:0 1px;}
+.vb.off .vb-f{background:var(--border-color)!important;}
+.vb.off .vb-v{color:var(--text-tertiary);}
+
+/* ===== 下拉菜单 ===== */
+.dd{position:absolute;top:100%;left:0;right:0;background:var(--bg-elevated);
+  border-bottom:1px solid var(--border-color);z-index:59;max-height:0;overflow:hidden;
+  transition:max-height .25s cubic-bezier(.4,0,.2,1);box-shadow:0 12px 28px rgba(0,0,0,.5);}
+.dd.show{max-height:300px;}
+.ddi{display:flex;align-items:center;gap:12px;padding:13px 16px;font-size:14px;
+  color:var(--text-secondary);cursor:pointer;border-bottom:1px solid var(--border-soft);}
+.ddi:active{background:var(--card-bg);}
+.ddi.on{color:var(--theme-color);background:rgba(255,102,0,.09);font-weight:600;}
+.ddi .material-icons{font-size:19px;}
+.ddi .bd{margin-left:auto;font-size:10px;color:var(--text-tertiary);}
+
+/* ===== 主体 ===== */
+.body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+.body::-webkit-scrollbar{width:0;}
+.panel{display:none;padding:12px;}
+.panel.active{display:block;animation:fi .18s ease;}
+.panel.tf{padding:0;height:100%;}
+@keyframes fi{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+
+.seg{display:flex;background:var(--card-bg);border-radius:var(--radius-sm);padding:3px;
+  margin-bottom:12px;border:1px solid var(--border-soft);}
+.segb{flex:1;text-align:center;padding:8px;font-size:13px;color:var(--text-secondary);
+  border-radius:6px;cursor:pointer;font-weight:500;}
+.segb.on{background:var(--theme-color);color:#fff;font-weight:600;}
+
+.card{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);
+  padding:12px;margin-bottom:12px;}
+.card-t{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;margin-bottom:10px;}
+.card-t .material-icons{font-size:16px;color:var(--theme-color);}
+.card-t .cnt{margin-left:auto;font-size:10px;color:var(--text-tertiary);font-weight:400;}
+
+/* ===== 服务 / 命令磁贴 ===== */
+.tile{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);
+  padding:10px 12px;display:flex;align-items:center;gap:9px;margin-bottom:7px;min-height:56px;}
+.tile:active{background:#1f2731;}
+.ti{width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.ti .material-icons{font-size:18px;}
+.tinfo{flex:1;min-width:0;}
+.tname{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px;}
+.tsub{font-size:10px;color:var(--text-tertiary);margin-top:2px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Menlo,Consolas,monospace;}
+.st{font-size:10px;display:flex;align-items:center;gap:4px;margin-top:3px;font-variant-numeric:tabular-nums;}
+.st-run{color:var(--ok);}
+.st-bad{color:var(--danger);}
+.st-good{color:var(--text-secondary);}
+.st .material-icons{font-size:11px;}
+.kb{font-size:8px;padding:1px 4px;border-radius:3px;font-weight:700;flex-shrink:0;}
+.kb-c{background:rgba(59,167,255,.16);color:var(--info);}
+.kb-s{background:rgba(155,89,182,.18);color:#b57edc;}
+.kb-w{background:rgba(255,77,79,.16);color:var(--danger);}
+.sw{width:42px;height:24px;border-radius:12px;background:var(--border-color);position:relative;
+  cursor:pointer;transition:background .2s;flex-shrink:0;}
+.sw::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+  background:#fff;transition:transform .2s;}
+.sw.on{background:var(--ok);}
+.sw.on::after{transform:translateX(18px);}
+.ib{width:32px;height:32px;border-radius:8px;background:var(--card-bg-2);border:none;
+  color:var(--text-tertiary);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;}
+.ib .material-icons{font-size:17px;}
+.tile-add{background:transparent;border:1px dashed var(--border-color);justify-content:center;
+  color:var(--text-tertiary);font-size:12px;gap:5px;}
+.glyph{color:var(--text-tertiary);font-size:17px!important;flex-shrink:0;}
+.hintbar{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-tertiary);
+  padding:9px 12px;background:rgba(245,166,35,.07);border:1px solid rgba(245,166,35,.2);
+  border-radius:var(--radius-sm);margin-top:10px;line-height:1.5;}
+.hintbar .material-icons{font-size:14px;color:var(--warn);flex-shrink:0;}
+
+/* ===== 终端 ===== */
+.tfw{display:flex;flex-direction:column;height:100%;}
+.tses{display:flex;gap:4px;padding:7px 10px;background:var(--card-bg);
+  border-bottom:1px solid var(--border-soft);overflow-x:auto;scrollbar-width:none;flex-shrink:0;}
+.tses::-webkit-scrollbar{display:none;}
+.ts{flex-shrink:0;padding:5px 10px;font-size:11px;color:var(--text-tertiary);background:var(--card-bg-2);
+  border-radius:20px;cursor:pointer;display:flex;align-items:center;gap:4px;}
+.ts.on{background:rgba(255,102,0,.16);color:var(--theme-color);font-weight:600;}
+.ts .material-icons{font-size:13px;}
+.tbody{flex:1;background:#0a0d11;padding:10px 12px;overflow-y:auto;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;line-height:1.6;
+  white-space:pre-wrap;word-break:break-all;color:#d6dee8;}
+.tp{color:#4ec9b0;}.tpa{color:#569cd6;}.tok{color:#2ecc71;}.twa{color:#f5a623;}
+.tdi{color:#5c6b7d;}.ter{color:#ff6b6b;}.thl{background:rgba(255,102,0,.2);color:#ffb27a;}
+.tcur{display:inline-block;width:6px;height:12px;background:var(--theme-color);
+  vertical-align:text-bottom;animation:bl 1.1s steps(1) infinite;}
+@keyframes bl{50%{opacity:0}}
+.thint{padding:5px 12px;font-size:9.5px;color:var(--text-tertiary);background:var(--bg-elevated);
+  display:flex;align-items:center;gap:5px;flex-shrink:0;}
+.thint .material-icons{font-size:12px;color:var(--ok);}
+.tin{flex-shrink:0;display:flex;gap:7px;padding:7px 10px;background:var(--card-bg);
+  border-top:1px solid var(--border-soft);align-items:center;}
+.tin input{flex:1;background:var(--card-bg-2);border:1px solid var(--border-color);
+  border-radius:var(--radius-sm);padding:9px 10px;color:var(--text-primary);font-size:12px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;outline:none;min-width:0;}
+.send{width:38px;height:38px;border-radius:var(--radius-sm);background:var(--theme-color);
+  color:#fff;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;}
+
+/* ===== 文件 ===== */
+.pbar{display:flex;align-items:center;gap:2px;background:var(--card-bg);border:1px solid var(--border-soft);
+  border-radius:var(--radius-sm);padding:8px 11px;font-size:12px;margin-bottom:10px;
+  overflow-x:auto;scrollbar-width:none;}
+.pbar::-webkit-scrollbar{display:none;}
+.cr{color:var(--text-secondary);white-space:nowrap;cursor:pointer;padding:2px 4px;}
+.cr.cur{color:var(--text-primary);font-weight:600;}
+.crs{color:var(--text-tertiary);font-size:10px;}
+.facts{display:flex;gap:6px;margin-bottom:10px;overflow-x:auto;scrollbar-width:none;}
+.facts::-webkit-scrollbar{display:none;}
+.fa{flex-shrink:0;display:flex;align-items:center;gap:4px;background:var(--card-bg);
+  border:1px solid var(--border-soft);border-radius:20px;padding:6px 12px;font-size:11.5px;
+  color:var(--text-secondary);cursor:pointer;}
+.fa .material-icons{font-size:14px;}
+.frow{display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--card-bg);
+  border:1px solid var(--border-soft);border-radius:var(--radius-sm);margin-bottom:6px;cursor:pointer;}
+.frow.sel{border-color:var(--theme-color);background:rgba(255,102,0,.08);}
+.fic{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.fic .material-icons{font-size:16px;}
+.f-dir{background:rgba(245,166,35,.16);color:var(--warn);}
+.f-fil{background:rgba(149,162,180,.14);color:var(--text-secondary);}
+.f-gg{background:rgba(46,204,113,.16);color:var(--ok);}
+.f-zp{background:rgba(155,89,182,.18);color:#b57edc;}
+.f-im{background:rgba(59,167,255,.16);color:var(--info);}
+.fm2{flex:1;min-width:0;}
+.fname{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fsub{font-size:10px;color:var(--text-tertiary);margin-top:2px;font-variant-numeric:tabular-nums;}
+.drop{border:1px dashed var(--border-color);border-radius:var(--radius-md);padding:16px;
+  text-align:center;color:var(--text-tertiary);font-size:11.5px;margin:10px 0;cursor:pointer;}
+.drop .material-icons{font-size:24px;display:block;margin-bottom:5px;}
+.jc{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);
+  padding:11px 12px;margin-bottom:7px;}
+.jt{display:flex;align-items:center;gap:6px;font-size:11.5px;margin-bottom:7px;}
+.jt .material-icons{font-size:15px;color:var(--theme-color);}
+.jp{margin-left:auto;color:var(--text-secondary);font-size:11px;font-variant-numeric:tabular-nums;}
+.jtr{height:5px;background:#212a35;border-radius:3px;overflow:hidden;}
+.jf{height:100%;background:linear-gradient(90deg,var(--theme-color),var(--theme-light));border-radius:3px;}
+.jf.dn{background:var(--ok);}
+.jfo{display:flex;justify-content:space-between;font-size:9.5px;color:var(--text-tertiary);margin-top:5px;}
+
+/* ===== 底部操作条 ===== */
+.selbar{position:absolute;bottom:0;left:0;right:0;background:var(--bg-elevated);
+  border-top:1px solid var(--border-color);padding:8px 10px;display:flex;gap:4px;z-index:70;
+  transform:translateY(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);}
+.selbar.show{transform:translateY(0);}
+.sb{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:9.5px;
+  color:var(--text-secondary);cursor:pointer;padding:5px 0;border-radius:var(--radius-sm);}
+.sb:active{background:var(--card-bg-2);color:var(--theme-color);}
+.sb .material-icons{font-size:18px;}
+.sb.dg{color:var(--danger);}
+
+/* ===== 下载 ===== */
+.sums{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}
+.sc{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);padding:11px 12px;}
+.sl{font-size:10px;color:var(--text-tertiary);display:flex;align-items:center;gap:4px;}
+.sl .material-icons{font-size:13px;}
+.sv{font-size:19px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;}
+.sv small{font-size:10px;font-weight:500;color:var(--text-tertiary);margin-left:2px;}
+.gt{font-size:10px;color:var(--text-tertiary);letter-spacing:.6px;margin:12px 0 7px;
+  display:flex;align-items:center;gap:6px;}
+.gt .cnt{background:var(--card-bg-2);border-radius:10px;padding:1px 7px;font-size:10px;color:var(--text-secondary);}
+.dc{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);
+  padding:11px 12px;margin-bottom:7px;}
+.dct{display:flex;align-items:center;gap:7px;}
+.dcn{flex:1;font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.dcp{font-size:11.5px;color:var(--text-secondary);font-variant-numeric:tabular-nums;flex-shrink:0;}
+.dctr{height:6px;background:#212a35;border-radius:3px;overflow:hidden;margin:8px 0 7px;}
+.dcf{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--theme-color),var(--theme-light));}
+.dcf.ok{background:var(--ok);}
+.dcf.idle{background:var(--text-tertiary);}
+.dcf2{display:flex;align-items:center;gap:10px;font-size:10px;color:var(--text-tertiary);flex-wrap:wrap;}
+.dcf2 .m{display:flex;align-items:center;gap:3px;}
+.dcf2 .material-icons{font-size:13px;}
+.dsp{color:var(--ok);font-weight:700;font-variant-numeric:tabular-nums;}
+.segs{display:flex;gap:1.5px;}
+.sg{width:3.5px;height:9px;border-radius:1px;background:var(--theme-color);}
+.sg.idle{background:var(--border-color);}
+.dbtns{display:flex;gap:5px;margin-top:9px;padding-top:8px;border-top:1px solid var(--border-soft);}
+.mb2{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;background:var(--card-bg-2);
+  border:none;border-radius:6px;padding:7px;font-size:11px;color:var(--text-secondary);
+  cursor:pointer;font-family:inherit;}
+.mb2 .material-icons{font-size:15px;}
+
+/* ===== 设置 ===== */
+.sg2{margin-bottom:12px;}
+.sgt{font-size:10px;color:var(--text-tertiary);letter-spacing:.8px;padding:0 4px 7px;}
+.sr{display:flex;align-items:center;gap:12px;padding:11px 12px;background:var(--card-bg);
+  border-bottom:1px solid var(--border-soft);}
+.sr:first-of-type{border-radius:var(--radius-sm) var(--radius-sm) 0 0;}
+.sr:last-of-type{border-bottom:none;border-radius:0 0 var(--radius-sm) var(--radius-sm);}
+.sk{font-size:12.5px;flex:1;min-width:0;}
+.sd{font-size:9.5px;color:var(--text-tertiary);margin-top:2px;}
+.sv2{flex-shrink:0;display:flex;align-items:center;gap:6px;}
+.inp{background:var(--card-bg-2);border:1px solid var(--border-color);border-radius:6px;
+  padding:6px 8px;color:var(--text-primary);font-size:12px;outline:none;font-family:inherit;}
+.w70{width:74px;}
+select.inp{appearance:none;padding-right:20px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%2395a2b4'><path d='M7 10l5 5 5-5z'/></svg>");
+  background-repeat:no-repeat;background-position:right 5px center;}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;}
+.btn{border:none;border-radius:var(--radius-sm);padding:9px 14px;font-size:13px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px;font-family:inherit;justify-content:center;}
+.btn .material-icons{font-size:16px;}
+.btnp{background:var(--theme-color);color:#fff;font-weight:600;}
+.btng{background:var(--card-bg-2);color:var(--text-secondary);}
+.btnd{background:rgba(255,77,79,.14);color:var(--danger);}
+.btnb{width:100%;margin-bottom:8px;}
+
+/* ===== 底部弹出面板 ===== */
+.sm{position:absolute;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;}
+.sm.show{display:block;animation:fi .15s ease;}
+.sh{position:absolute;bottom:0;left:0;right:0;background:var(--bg-elevated);
+  border-radius:16px 16px 0 0;z-index:201;transform:translateY(100%);
+  transition:transform .26s cubic-bezier(.4,0,.2,1);max-height:86%;display:flex;flex-direction:column;}
+.sh.show{transform:translateY(0);}
+.shh{padding:14px 16px;border-bottom:1px solid var(--border-soft);display:flex;
+  align-items:center;justify-content:space-between;flex-shrink:0;}
+.sht{font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px;}
+.shx{color:var(--text-tertiary);cursor:pointer;}
+.shb{padding:14px 16px;overflow-y:auto;}
+.shf{padding:12px 16px 16px;display:flex;gap:8px;flex-shrink:0;}
+.shf .btn{flex:1;padding:13px;}
+.fg{margin-bottom:14px;}
+.fg:last-child{margin-bottom:0;}
+.fl{display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;}
+.fl .req{color:var(--danger);}
+.inpf{width:100%;}
+textarea.inp{resize:none;min-height:64px;font-family:ui-monospace,Menlo,Consolas,monospace;}
+.sp2{display:flex;gap:8px;}
+.so{flex:1;border:1px solid var(--border-color);border-radius:var(--radius-sm);padding:9px;
+  cursor:pointer;text-align:center;font-size:11.5px;color:var(--text-secondary);}
+.so.on{border-color:var(--theme-color);background:rgba(255,102,0,.1);color:var(--theme-color);font-weight:600;}
+.so .material-icons{display:block;font-size:19px;margin-bottom:3px;}
+.hint{font-size:10px;color:var(--text-tertiary);margin-top:5px;line-height:1.5;}
+.chk{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--text-secondary);cursor:pointer;}
+.al{padding:5px 0;}
+.ai{display:flex;align-items:center;gap:12px;padding:12px 16px;font-size:14px;color:var(--text-secondary);cursor:pointer;}
+.ai:active{background:var(--card-bg);}
+.ai .material-icons{font-size:19px;}
+.ai.dg{color:var(--danger);}
+.as{height:1px;background:var(--border-soft);margin:4px 0;}
+.logbox{background:#0a0d11;border:1px solid var(--border-soft);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;
+  line-height:1.6;color:#c9d4e0;height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;}
+.bex{font-size:10px;padding:2px 8px;border-radius:20px;display:inline-flex;align-items:center;gap:4px;font-weight:600;}
+.bex .material-icons{font-size:12px;}
+.be-ok{background:rgba(46,204,113,.14);color:var(--ok);}
+.be-bad{background:rgba(255,77,79,.14);color:var(--danger);}
+.be-run{background:rgba(59,167,255,.14);color:var(--info);}
+.lmeta{display:flex;align-items:center;gap:6px;margin-bottom:9px;flex-wrap:wrap;}
+.chip{font-size:9.5px;color:var(--text-tertiary);border:1px solid var(--border-color);
+  padding:2px 7px;border-radius:20px;display:inline-flex;align-items:center;gap:3px;}
+.chip .material-icons{font-size:11px;}
+.wb{background:rgba(245,166,35,.09);border:1px solid rgba(245,166,35,.28);border-radius:var(--radius-sm);
+  padding:10px;font-size:11px;color:#f7c46c;display:flex;gap:8px;line-height:1.5;margin-bottom:12px;}
+.wb .material-icons{font-size:16px;flex-shrink:0;color:var(--warn);}
+
+.toast{position:fixed;top:76px;left:50%;transform:translateX(-50%) translateY(-12px);
+  padding:9px 16px;background:rgba(20,26,33,.97);border:1px solid var(--border-color);
+  color:var(--text-primary);border-radius:var(--radius-sm);font-size:11.5px;z-index:9999;
+  opacity:0;transition:all .25s;pointer-events:none;max-width:330px;text-align:center;
+  display:flex;align-items:center;gap:6px;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.toast .material-icons{font-size:15px;color:var(--ok);}
+.pb2{position:absolute;bottom:4px;left:50%;transform:translateX(-50%);z-index:300;font-size:8.5px;
+  color:var(--text-tertiary);letter-spacing:.3px;pointer-events:none;opacity:.7;}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== 顶栏：图标下拉按钮 + 竖直进度条 ===== -->
+  <header class="topbar">
+    <div class="iconbtn" onclick="toggleDD()"><span class="material-icons" id="tbIcon">bolt</span></div>
+    <div class="vbs">
+      <div class="vb"><div class="vb-v">34%</div><div class="vb-t"><div class="vb-f" data-i="0" style="height:34%;background:#FF6600"></div></div><div class="vb-n">CPU</div></div>
+      <div class="vb"><div class="vb-v">62%</div><div class="vb-t"><div class="vb-f" data-i="1" style="height:62%;background:#3ba7ff"></div></div><div class="vb-n">内存</div></div>
+      <div class="vb"><div class="vb-v">88%</div><div class="vb-t"><div class="vb-f" data-i="2" style="height:88%;background:#2ecc71"></div></div><div class="vb-n">GPU</div></div>
+      <div class="vb"><div class="vb-v">54%</div><div class="vb-t"><div class="vb-f" data-i="3" style="height:54%;background:#f5a623"></div></div><div class="vb-n">显存</div></div>
+      <div class="vb-sep"></div>
+      <div class="vb"><div class="vb-v" style="color:var(--warn)">78%</div><div class="vb-t"><div class="vb-f" style="height:78%;background:#f5a623"></div></div><div class="vb-n">/</div></div>
+      <div class="vb"><div class="vb-v">41%</div><div class="vb-t"><div class="vb-f" style="height:41%;background:#2ecc71"></div></div><div class="vb-n">hdd</div></div>
+    </div>
+    <div class="dd" id="dd">
+      <div class="ddi on" data-tab="quick" onclick="pick('quick')"><span class="material-icons">bolt</span>快捷命令<span class="bd">3 运行中 · 1 异常退出</span></div>
+      <div class="ddi" data-tab="term" onclick="pick('term')"><span class="material-icons">terminal</span>终端<span class="bd">2 会话</span></div>
+      <div class="ddi" data-tab="files" onclick="pick('files')"><span class="material-icons">folder</span>文件管理<span class="bd">2 任务</span></div>
+      <div class="ddi" data-tab="dl" onclick="pick('dl')"><span class="material-icons">download</span>下载<span class="bd">18.4 MB/s</span></div>
+      <div class="ddi" data-tab="set" onclick="pick('set')"><span class="material-icons">settings</span>设置</div>
+    </div>
+  </header>
+
+  <div class="body" id="body">
+
+    <!-- 快捷命令 -->
+    <section class="panel active" id="p-quick">
+      <div class="seg">
+        <div class="segb on" onclick="pickSeg(this,'svc')">服务管理</div>
+        <div class="segb" onclick="pickSeg(this,'cmd')">快捷命令</div>
+      </div>
+
+      <div id="s-svc">
+        <div class="tile">
+          <div class="ti" style="background:rgba(46,204,113,.14);color:var(--ok)"><span class="material-icons">smart_toy</span></div>
+          <div class="tinfo">
+            <div class="tname">llama-server <span class="kb kb-c">CMD</span></div>
+            <div class="st st-run"><span class="dot"></span>PID 41287 · 2 小时</div>
+          </div>
+          <button class="ib" onclick="openLog('llama-server','run',0)"><span class="material-icons">receipt_long</span></button>
+          <div class="sw on" onclick="toggleSvc(this,'llama-server')"></div>
+        </div>
+
+        <div class="tile">
+          <div class="ti" style="background:rgba(59,167,255,.14);color:var(--info)"><span class="material-icons">cloud_download</span></div>
+          <div class="tinfo">
+            <div class="tname">aria2 <span class="kb kb-s">SYSV</span></div>
+            <div class="st st-run"><span class="dot"></span>active · 2 任务</div>
+          </div>
+          <button class="ib" onclick="openLog('aria2','run',0)"><span class="material-icons">receipt_long</span></button>
+          <div class="sw on" onclick="toggleSvc(this,'aria2')"></div>
+        </div>
+
+        <div class="tile">
+          <div class="ti" style="background:rgba(255,77,79,.13);color:var(--danger)"><span class="material-icons">hub</span></div>
+          <div class="tinfo">
+            <div class="tname">frpc <span class="kb kb-c">CMD</span></div>
+            <div class="st st-bad"><span class="material-icons">error</span>异常退出 · code 1 · 06:12</div>
+          </div>
+          <button class="ib" onclick="openLog('frpc','bad',1)"><span class="material-icons">receipt_long</span></button>
+          <div class="sw" onclick="toggleSvc(this,'frpc')"></div>
+        </div>
+
+        <div class="tile">
+          <div class="ti" style="background:rgba(149,162,180,.12);color:var(--text-secondary)"><span class="material-icons">dns</span></div>
+          <div class="tinfo">
+            <div class="tname">qbittorrent-nox <span class="kb kb-c">CMD</span></div>
+            <div class="st st-good"><span class="material-icons">check_circle</span>正常退出 · code 0 · 昨天</div>
+          </div>
+          <button class="ib" onclick="openLog('qbittorrent-nox','good',0)"><span class="material-icons">receipt_long</span></button>
+          <div class="sw" onclick="toggleSvc(this,'qbittorrent-nox')"></div>
+        </div>
+
+        <div class="tile tile-add" onclick="openSheet('shSvc')"><span class="material-icons" style="font-size:16px">add</span>添加服务</div>
+
+        <div class="hintbar"><span class="material-icons">info</span>CMD 类型服务随面板存活，面板重启会被一并停止。SYSV 类型不受影响。</div>
+      </div>
+
+      <div id="s-cmd" style="display:none">
+        <div class="tile" onclick="runInTerm('apt update && apt upgrade -y')">
+          <div class="ti" style="background:rgba(59,167,255,.14);color:var(--info)"><span class="material-icons">system_update</span></div>
+          <div class="tinfo"><div class="tname">更新系统</div><div class="tsub">apt update &amp;&amp; apt upgrade -y</div></div>
+          <span class="material-icons glyph">chevron_right</span>
+        </div>
+        <div class="tile" onclick="runInTerm('nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv')">
+          <div class="ti" style="background:rgba(46,204,113,.14);color:var(--ok)"><span class="material-icons">monitor_heart</span></div>
+          <div class="tinfo"><div class="tname">GPU 进程</div><div class="tsub">nvidia-smi --query-compute-apps</div></div>
+          <span class="material-icons glyph">chevron_right</span>
+        </div>
+        <div class="tile" onclick="runInTerm('journalctl --vacuum-time=7d')">
+          <div class="ti" style="background:rgba(245,166,35,.14);color:var(--warn)"><span class="material-icons">cleaning_services</span></div>
+          <div class="tinfo"><div class="tname">清理日志</div><div class="tsub">journalctl --vacuum-time=7d</div></div>
+          <span class="material-icons glyph">chevron_right</span>
+        </div>
+        <div class="tile" onclick="runInTerm('du -sh /data/* | sort -h')">
+          <div class="ti" style="background:rgba(155,89,182,.16);color:#b57edc"><span class="material-icons">pie_chart</span></div>
+          <div class="tinfo"><div class="tname">磁盘占用排行</div><div class="tsub">du -sh /data/* | sort -h</div></div>
+          <span class="material-icons glyph">chevron_right</span>
+        </div>
+        <div class="tile" onclick="confirmDanger('rm -rf /data/models/tmp-cache/*','包含 rm -rf，将永久删除文件且不进回收站。')">
+          <div class="ti" style="background:rgba(255,77,79,.13);color:var(--danger)"><span class="material-icons">delete_sweep</span></div>
+          <div class="tinfo"><div class="tname">清空模型缓存 <span class="kb kb-w">确认</span></div><div class="tsub">rm -rf /data/models/tmp-cache/*</div></div>
+          <span class="material-icons glyph">chevron_right</span>
+        </div>
+        <div class="tile tile-add" onclick="openSheet('shCmd')"><span class="material-icons" style="font-size:16px">add</span>添加命令</div>
+        <div class="hintbar"><span class="material-icons">terminal</span>点击后跳转到终端执行；当前会话忙时自动新建。</div>
+      </div>
+    </section>
+
+    <!-- 终端 -->
+    <section class="panel tf" id="p-term">
+      <div class="tfw">
+        <div class="tses">
+          <div class="ts on"><span class="material-icons">terminal</span>lp-1</div>
+          <div class="ts"><span class="material-icons">hourglass_top</span>lp-2 忙</div>
+          <div class="ts" onclick="showToast('新建 tmux 会话')"><span class="material-icons">add</span></div>
+        </div>
+        <div class="tbody" id="termBody"><span class="tp">root@srv</span>:<span class="tpa">/data/models</span>$ ls -lh
+total 14G
+-rw-r--r-- 1 root root 5.1G Sep  8 21:14 qwen3-8b-ud-q4k_m.gguf
+-rw-r--r-- 1 root root 4.2G Sep  6 09:03 qwen3-4b-q5k_m.gguf
+drwxr-xr-x 2 root root 4.0K Sep  9 18:22 <span class="thl">tmp-cache</span>
+
+<span class="tp">root@srv</span>:<span class="tpa">/data/models</span>$ <span class="tcur"></span></div>
+        <div class="thint"><span class="material-icons">wifi_tethering</span>tmux 存活 · 关页面不中断 · 20000 行</div>
+        <div class="tin">
+          <input id="termInput" placeholder="输入命令" onkeydown="if(event.key==='Enter')sendTerm()">
+          <button class="send" onclick="sendTerm()"><span class="material-icons">arrow_upward</span></button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 文件管理 -->
+    <section class="panel" id="p-files">
+      <div class="pbar">
+        <span class="material-icons" style="font-size:14px;color:var(--text-tertiary);margin-right:4px">folder_open</span>
+        <span class="cr">/</span><span class="crs">›</span><span class="cr">data</span><span class="crs">›</span><span class="cr cur">models</span>
+      </div>
+      <div class="facts">
+        <div class="fa" onclick="showToast('上级目录')"><span class="material-icons">arrow_upward</span>上级</div>
+        <div class="fa" onclick="showToast('已刷新')"><span class="material-icons">refresh</span>刷新</div>
+        <div class="fa" onclick="showToast('新建文件夹')"><span class="material-icons">create_new_folder</span>新建</div>
+        <div class="fa" onclick="showToast('已粘贴 1 项')"><span class="material-icons">content_paste</span>粘贴</div>
+        <div class="fa" onclick="showToast('上传')"><span class="material-icons">cloud_upload</span>上传</div>
+      </div>
+
+      <div class="frow" onclick="selFile(this,'tmp-cache')">
+        <span class="material-icons fic f-dir">folder</span>
+        <div class="fm2"><div class="fname">tmp-cache</div><div class="fsub">4.0 KB · 09-09 18:22 · 12 项</div></div>
+        <span class="material-icons glyph" onclick="event.stopPropagation();openSheet('shFile')">more_vert</span>
+      </div>
+      <div class="frow sel" onclick="selFile(this,'qwen3-8b-ud-q4k_m.gguf')">
+        <span class="material-icons fic f-gg">memory</span>
+        <div class="fm2"><div class="fname">qwen3-8b-ud-q4k_m.gguf</div><div class="fsub">5.1 GB · 09-08 21:14</div></div>
+        <span class="material-icons glyph" onclick="event.stopPropagation();openSheet('shFile')">more_vert</span>
+      </div>
+      <div class="frow" onclick="selFile(this,'qwen3-4b-q5k_m.gguf')">
+        <span class="material-icons fic f-gg">memory</span>
+        <div class="fm2"><div class="fname">qwen3-4b-q5k_m.gguf</div><div class="fsub">4.2 GB · 09-06 09:03</div></div>
+        <span class="material-icons glyph" onclick="event.stopPropagation();openSheet('shFile')">more_vert</span>
+      </div>
+      <div class="frow" onclick="selFile(this,'llama.cpp-build-20260901.zip')">
+        <span class="material-icons fic f-zp">folder_zip</span>
+        <div class="fm2"><div class="fname">llama.cpp-build-20260901.zip</div><div class="fsub">386 MB · 09-01 14:47</div></div>
+        <span class="material-icons glyph" onclick="event.stopPropagation();openSheet('shFile')">more_vert</span>
+      </div>
+      <div class="frow" onclick="selFile(this,'nvtop-screenshot.png')">
+        <span class="material-icons fic f-im">image</span>
+        <div class="fm2"><div class="fname">nvtop-screenshot.png</div><div class="fsub">248 KB · 09-05 22:58</div></div>
+        <span class="material-icons glyph" onclick="event.stopPropagation();openSheet('shFile')">more_vert</span>
+      </div>
+
+      <div class="drop" onclick="showToast('选择文件上传')"><span class="material-icons">cloud_upload</span>拖放或点击上传 · 断点续传</div>
+
+      <div class="card-t" style="margin-top:12px"><span class="material-icons">move_item</span>后台任务<span class="cnt">关页面不中断</span></div>
+      <div class="jc">
+        <div class="jt"><span class="material-icons">content_copy</span>复制到 /mnt/hdd/models/<span class="jp">62%</span></div>
+        <div class="jtr"><div class="jf" style="width:62%"></div></div>
+        <div class="jfo"><span>3.16 / 5.10 GB · 128 MB/s</span><span onclick="showToast('已取消')">取消</span></div>
+      </div>
+      <div class="jc">
+        <div class="jt"><span class="material-icons">cloud_upload</span>上传 3 个文件<span class="jp">100%</span></div>
+        <div class="jtr"><div class="jf dn" style="width:100%"></div></div>
+        <div class="jfo"><span>248 MB · 已完成</span><span style="color:var(--ok)">完成</span></div>
+      </div>
+      <div style="height:56px"></div>
+    </section>
+
+    <!-- 下载 -->
+    <section class="panel" id="p-dl">
+      <div class="sums">
+        <div class="sc"><div class="sl"><span class="material-icons">arrow_downward</span>下载</div><div class="sv" style="color:var(--ok)">18.4<small>MB/s</small></div></div>
+        <div class="sc"><div class="sl"><span class="material-icons">playlist_play</span>活跃 / 等待</div><div class="sv">2<small>/ 1</small></div></div>
+      </div>
+      <button class="btn btnp btnb" onclick="openSheet('shDl')"><span class="material-icons">add</span>新建下载</button>
+
+      <div class="gt">下载中 <span class="cnt">2</span></div>
+      <div class="dc">
+        <div class="dct"><span class="material-icons" style="color:var(--ok);font-size:16px">description</span>
+          <div class="dcn">Qwen3.8-flash-UD_Q4_K_M.gguf</div><div class="dcp">71.6%</div></div>
+        <div class="dctr"><div class="dcf" style="width:71.6%"></div></div>
+        <div class="dcf2">
+          <span class="m"><span class="material-icons">speed</span><span class="dsp">14.8 MB/s</span></span>
+          <span class="m"><span class="material-icons">schedule</span>1 分 58 秒</span>
+          <span class="m">4.31/6.02 GB</span>
+        </div>
+        <div class="dcf2" style="margin-top:4px"><span class="m">连接 <span class="segs"><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg"></i><i class="sg idle"></i><i class="sg idle"></i><i class="sg idle"></i><i class="sg idle"></i></span> 12/16</span></div>
+        <div class="dbtns">
+          <button class="mb2" onclick="showToast('已暂停')"><span class="material-icons">pause</span>暂停</button>
+          <button class="mb2" onclick="pick('files')"><span class="material-icons">folder_open</span>目录</button>
+          <button class="mb2" onclick="showToast('已移除')"><span class="material-icons">close</span>移除</button>
+        </div>
+      </div>
+      <div class="dc">
+        <div class="dct"><span class="material-icons" style="color:var(--ok);font-size:16px">archive</span>
+          <div class="dcn">llama.cpp-b5821-linux-cuda.tar.gz</div><div class="dcp">36.2%</div></div>
+        <div class="dctr"><div class="dcf" style="width:36.2%"></div></div>
+        <div class="dcf2">
+          <span class="m"><span class="material-icons">speed</span><span class="dsp">3.6 MB/s</span></span>
+          <span class="m"><span class="material-icons">schedule</span>1 分 02 秒</span>
+          <span class="m">126/348 MB</span>
+        </div>
+        <div class="dbtns">
+          <button class="mb2" onclick="showToast('已暂停')"><span class="material-icons">pause</span>暂停</button>
+          <button class="mb2" onclick="pick('files')"><span class="material-icons">folder_open</span>目录</button>
+          <button class="mb2" onclick="showToast('已移除')"><span class="material-icons">close</span>移除</button>
+        </div>
+      </div>
+
+      <div class="gt">等待中 <span class="cnt">1</span></div>
+      <div class="dc" style="opacity:.7">
+        <div class="dct"><span class="material-icons" style="color:var(--text-tertiary);font-size:16px">hourglass_empty</span>
+          <div class="dcn">ubuntu-26.04-live-server.iso</div><div class="dcp">0%</div></div>
+        <div class="dctr"><div class="dcf idle" style="width:0"></div></div>
+        <div class="dcf2"><span class="m">排队中 · 已达并发上限</span></div>
+      </div>
+
+      <div class="gt">已完成 <span class="cnt">2</span></div>
+      <div class="dc">
+        <div class="dct"><span class="material-icons" style="color:var(--ok);font-size:16px">check_circle</span>
+          <div class="dcn">qwen3-4b-q5k_m.gguf</div><div class="dcp">100%</div></div>
+        <div class="dctr"><div class="dcf ok" style="width:100%"></div></div>
+        <div class="dcf2"><span class="m">4.20 GB · 09-06 · 平均 21.3 MB/s</span></div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="panel" id="p-set">
+      <div class="sg2">
+        <div class="sgt">通用</div>
+        <div class="sr"><div class="sk">监听地址</div><div class="sv2"><input class="inp w70 mono" value="100.96.1.1"></div></div>
+        <div class="sr"><div class="sk">端口</div><div class="sv2"><input class="inp w70 mono" value="8443"></div></div>
+        <div class="sr"><div class="sk">TLS</div><div class="sv2"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+        <div class="sr"><div class="sk">主题</div><div class="sv2"><select class="inp"><option>深色</option><option>浅色</option></select></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">仪表盘</div>
+        <div class="sr"><div class="sk">采样间隔<div class="sd">无连接时自动暂停</div></div><div class="sv2"><select class="inp"><option>1 秒</option><option>2 秒</option></select></div></div>
+        <div class="sr"><div class="sk">顶栏指标条</div><div class="sv2"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">服务托管</div>
+        <div class="sr"><div class="sk">日志缓存行数<div class="sd">仅内存，不持久化</div></div><div class="sv2"><input class="inp w70 mono" value="500"></div></div>
+        <div class="sr"><div class="sk">开机自动拉起<div class="sd">面板重启不恢复</div></div><div class="sv2"><div class="sw" onclick="this.classList.toggle('on')"></div></div></div>
+        <div class="sr"><div class="sk">停止宽限</div><div class="sv2"><input class="inp w70 mono" value="10 秒"></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">终端</div>
+        <div class="sr"><div class="sk">默认 shell</div><div class="sv2"><input class="inp w70 mono" value="/bin/bash"></div></div>
+        <div class="sr"><div class="sk">scrollback</div><div class="sv2"><select class="inp"><option>20000</option><option>5000</option><option>100000</option></select></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">文件与回收站</div>
+        <div class="sr"><div class="sk">启用回收站</div><div class="sv2"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+        <div class="sr"><div class="sk">回收站位置</div><div class="sv2"><input class="inp w70 mono" value="/mnt/hdd"></div></div>
+        <div class="sr"><div class="sk">保留天数</div><div class="sv2"><input class="inp w70 mono" value="3 天"></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">下载</div>
+        <div class="sr"><div class="sk">默认目录</div><div class="sv2"><input class="inp w70 mono" value="/data"></div></div>
+        <div class="sr"><div class="sk">最大并发</div><div class="sv2"><input class="inp w70 mono" value="5"></div></div>
+        <div class="sr"><div class="sk">单任务连接数</div><div class="sv2"><select class="inp"><option>16</option><option>8</option></select></div></div>
+      </div>
+      <div class="sg2">
+        <div class="sgt">系统</div>
+        <div class="sr"><div class="sk">运行日志<div class="sd">发布构建不产生日志文件</div></div><div class="sv2"><span class="chip">release</span></div></div>
+        <div class="sr"><div class="sk">修改密码</div><div class="sv2"><button class="btn btng" style="padding:5px 10px;font-size:11.5px" onclick="showToast('修改密码')">修改</button></div></div>
+        <div class="sr"><div class="sk">登出全部会话<div class="sd">2 个活动会话</div></div><div class="sv2"><button class="btn btng" style="padding:5px 10px;font-size:11.5px" onclick="showToast('已登出全部')">登出</button></div></div>
+      </div>
+      <button class="btn btnd btnb" style="margin-top:10px" onclick="confirmDanger('systemctl restart litepanel','会连带停止所有 CMD 类型服务。终端会话不受影响。')">
+        <span class="material-icons">restart_alt</span>重启面板
+      </button>
+      <div style="text-align:center;font-size:9.5px;color:var(--text-tertiary);padding:10px 0 20px">LitePanel v0.1.0</div>
+    </section>
+
+  </div>
+
+  <!-- 选中文件后的底部操作条 -->
+  <div class="selbar" id="selbar">
+    <div class="sb" onclick="showToast('已复制 1 项')"><span class="material-icons">content_copy</span>复制</div>
+    <div class="sb" onclick="showToast('已剪切 1 项')"><span class="material-icons">content_cut</span>剪切</div>
+    <div class="sb" onclick="showToast('开始下载')"><span class="material-icons">download</span>下载</div>
+    <div class="sb" onclick="showToast('已重命名')"><span class="material-icons">drive_file_rename_outline</span>重命名</div>
+    <div class="sb dg" onclick="confirmDanger('删除 qwen3-8b-ud-q4k_m.gguf','移入回收站 /mnt/hdd/.trash，保留 3 天后永久删除。')"><span class="material-icons">delete</span>删除</div>
+  </div>
+
+  <!-- 服务日志 -->
+  <div class="sm" id="shLog" onclick="closeSheet('shLog')"></div>
+  <div class="sh" id="sh-shLog">
+    <div class="shh"><div class="sht"><span class="material-icons" style="color:var(--theme-color);font-size:17px">receipt_long</span><span id="logName">服务输出</span></div><span class="material-icons shx" onclick="closeSheet('shLog')">close</span></div>
+    <div class="shb" style="padding:12px 16px">
+      <div class="lmeta">
+        <span id="logBadge" class="bex be-run"><span class="material-icons">play_circle</span>运行中</span>
+        <span class="chip" id="logCount">500 行</span>
+      </div>
+      <div class="chip" style="margin-bottom:9px"><span class="material-icons">memory</span>内存缓存最近 500 行 · 不持久化</div>
+      <div class="logbox" id="logBody"></div>
+    </div>
+    <div class="shf">
+      <button class="btn btng" onclick="showToast('已复制日志')"><span class="material-icons">content_copy</span>复制</button>
+      <button class="btn btng" onclick="showToast('已清空缓存')"><span class="material-icons">delete_sweep</span>清空</button>
+    </div>
+  </div>
+
+  <!-- 文件动作 -->
+  <div class="sm" id="shFile" onclick="closeSheet('shFile')"></div>
+  <div class="sh" id="sh-shFile">
+    <div class="shh"><div class="sht" id="shFileName">文件</div><span class="material-icons shx" onclick="closeSheet('shFile')">close</span></div>
+    <div class="al">
+      <div class="ai" onclick="closeSheet('shFile');showToast('打开')"><span class="material-icons">open_in_new</span>打开</div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('已复制路径')"><span class="material-icons">link</span>复制路径</div>
+      <div class="as"></div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('已剪切')"><span class="material-icons">content_cut</span>剪切</div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('已复制')"><span class="material-icons">content_copy</span>复制</div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('已粘贴')"><span class="material-icons">content_paste</span>粘贴</div>
+      <div class="as"></div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('开始下载')"><span class="material-icons">download</span>下载</div>
+      <div class="ai" onclick="closeSheet('shFile');showToast('已重命名')"><span class="material-icons">drive_file_rename_outline</span>重命名</div>
+      <div class="ai" onclick="closeSheet('shFile');pick('term')"><span class="material-icons">terminal</span>在终端中打开</div>
+      <div class="as"></div>
+      <div class="ai dg" onclick="closeSheet('shFile');confirmDanger('删除文件','移入回收站 /mnt/hdd/.trash，保留 3 天后永久删除。')"><span class="material-icons">delete</span>删除</div>
+    </div>
+  </div>
+
+  <!-- 添加服务 -->
+  <div class="sm" id="shSvc" onclick="closeSheet('shSvc')"></div>
+  <div class="sh" id="sh-shSvc">
+    <div class="shh"><div class="sht">添加服务</div><span class="material-icons shx" onclick="closeSheet('shSvc')">close</span></div>
+    <div class="shb">
+      <div class="fg"><label class="fl">名称<span class="req">*</span></label><input class="inp inpf" placeholder="llama-server"></div>
+      <div class="fg"><label class="fl">类型</label>
+        <div class="sp2">
+          <div class="so on" onclick="pickSeg2(this)"><span class="material-icons">terminal</span>命令</div>
+          <div class="so" onclick="pickSeg2(this)"><span class="material-icons">settings_suggest</span>systemd</div>
+        </div>
+        <div class="hint">命令类型随面板存活；systemd 类型不受面板重启影响。</div>
+      </div>
+      <div class="fg"><label class="fl">启动命令<span class="req">*</span></label><textarea class="inp inpf" placeholder="llama-server -m model.gguf -ngl 99"></textarea></div>
+      <div class="fg"><label class="fl">工作目录</label><input class="inp inpf mono" value="/data/models"></div>
+      <div class="fg"><label class="chk"><div class="sw" onclick="event.stopPropagation();this.classList.toggle('on')"></div>开机自动拉起</label></div>
+    </div>
+    <div class="shf"><button class="btn btng" onclick="closeSheet('shSvc')">取消</button><button class="btn btnp" onclick="closeSheet('shSvc');showToast('服务已添加')">添加</button></div>
+  </div>
+
+  <!-- 添加命令 -->
+  <div class="sm" id="shCmd" onclick="closeSheet('shCmd')"></div>
+  <div class="sh" id="sh-shCmd">
+    <div class="shh"><div class="sht">添加快捷命令</div><span class="material-icons shx" onclick="closeSheet('shCmd')">close</span></div>
+    <div class="shb">
+      <div class="fg"><label class="fl">名称<span class="req">*</span></label><input class="inp inpf" placeholder="磁盘占用排行"></div>
+      <div class="fg"><label class="fl">命令<span class="req">*</span></label><textarea class="inp inpf" placeholder="du -sh /data/* | sort -h"></textarea></div>
+      <div class="hint" style="margin-bottom:14px">点击后跳转到终端执行；当前会话忙时自动新建。</div>
+      <div class="fg"><label class="chk"><div class="sw" onclick="this.classList.toggle('on')"></div>执行前二次确认</label></div>
+    </div>
+    <div class="shf"><button class="btn btng" onclick="closeSheet('shCmd')">取消</button><button class="btn btnp" onclick="closeSheet('shCmd');showToast('命令已添加')">添加</button></div>
+  </div>
+
+  <!-- 新建下载 -->
+  <div class="sm" id="shDl" onclick="closeSheet('shDl')"></div>
+  <div class="sh" id="sh-shDl">
+    <div class="shh"><div class="sht">新建下载</div><span class="material-icons shx" onclick="closeSheet('shDl')">close</span></div>
+    <div class="shb">
+      <div class="fg"><label class="fl">链接<span class="req">*</span></label><textarea class="inp inpf" placeholder="每行一个">https://huggingface.co/.../model.gguf</textarea></div>
+      <div class="fg"><label class="fl">保存目录</label><input class="inp inpf mono" value="/data/models"></div>
+      <div class="fg"><label class="fl">连接数</label><select class="inp inpf"><option>16</option><option>8</option><option>4</option></select></div>
+    </div>
+    <div class="shf"><button class="btn btng" onclick="closeSheet('shDl')">取消</button><button class="btn btnp" onclick="closeSheet('shDl');showToast('已提交给 aria2')">开始</button></div>
+  </div>
+
+  <!-- 危险确认 -->
+  <div class="sm" id="shDg" onclick="closeSheet('shDg')"></div>
+  <div class="sh" id="sh-shDg">
+    <div class="shh"><div class="sht" style="color:var(--danger)"><span class="material-icons" style="font-size:17px">warning</span>需要确认</div><span class="material-icons shx" onclick="closeSheet('shDg')">close</span></div>
+    <div class="shb">
+      <div class="wb"><span class="material-icons">error_outline</span><span id="dgMsg"></span></div>
+      <div class="logbox" id="dgCmd" style="height:auto"></div>
+    </div>
+    <div class="shf"><button class="btn btng" onclick="closeSheet('shDg')">取消</button><button class="btn btnd" onclick="closeSheet('shDg');showToast('已执行')">确认执行</button></div>
+  </div>
+
+  <div class="pb2">UI 原型 v2 · 数据为模拟 · 375 × 812</div>
+</div>
+
+<div class="toast" id="toast"><span class="material-icons">check_circle</span><span id="toastMsg"></span></div>
+
+<script>
+var T={quick:'bolt',term:'terminal',files:'folder',dl:'download',set:'settings'};
+var NAMES={quick:'快捷命令',term:'终端',files:'文件管理',dl:'下载',set:'设置'};
+function pick(k){
+  document.querySelectorAll('.ddi').forEach(function(d){d.classList.toggle('on',d.dataset.tab===k);});
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='p-'+k);});
+  document.getElementById('tbIcon').textContent=T[k];
+  closeDD();hideSelbar();
+  document.getElementById('body').scrollTop=0;
+}
+function toggleDD(){var d=document.getElementById('dd');d.classList.toggle('show');}
+function closeDD(){document.getElementById('dd').classList.remove('show');}
+function showToast(m){var t=document.getElementById('toast');document.getElementById('toastMsg').textContent=m;
+  t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},1800);}
+function openSheet(id){document.getElementById(id).classList.add('show');document.getElementById('sh-'+id).classList.add('show');}
+function closeSheet(id){document.getElementById(id).classList.remove('show');document.getElementById('sh-'+id).classList.remove('show');}
+function pickSeg(el,k){
+  document.querySelectorAll('.segb').forEach(function(b){b.classList.remove('on');});
+  el.classList.add('on');
+  document.getElementById('s-svc').style.display=(k==='svc')?'block':'none';
+  document.getElementById('s-cmd').style.display=(k==='cmd')?'block':'none';
+}
+function pickSeg2(el){el.parentNode.querySelectorAll('.so').forEach(function(o){o.classList.remove('on');});el.classList.add('on');}
+function confirmDanger(c,m){document.getElementById('dgCmd').textContent='$ '+c;document.getElementById('dgMsg').textContent=m;openSheet('shDg');}
+function selFile(r,n){
+  document.querySelectorAll('.frow').forEach(function(x){x.classList.remove('sel');});
+  r.classList.add('sel');
+  document.getElementById('shFileName').textContent=n;
+  document.getElementById('selbar').classList.add('show');
+}
+function hideSelbar(){document.getElementById('selbar').classList.remove('show');}
+function sendTerm(){var i=document.getElementById('termInput');if(!i.value.trim())return;showToast('已发送：'+i.value);i.value='';}
+
+function toggleSvc(el,name){
+  el.classList.toggle('on');
+  var on=el.classList.contains('on');
+  var st=el.closest('.tile').querySelector('.st');
+  if(on){st.className='st st-run';st.innerHTML='<span class="dot"></span>PID '+Math.floor(40000+Math.random()*9000)+' · 刚启动';}
+  else{st.className='st st-good';st.innerHTML='<span class="material-icons">check_circle</span>正常退出 · code 0 · 刚刚';}
+  showToast(name+(on?' 已启动':' 已停止'));
+}
+
+var termBusy=false;
+function runInTerm(cmd){
+  var target='lp-1';
+  if(termBusy){target='lp-'+(Math.floor(Math.random()*7)+3);showToast('lp-1 忙，已新建 '+target);}
+  pick('term');
+  var b=document.getElementById('termBody');
+  b.innerHTML=b.innerHTML.replace(/<span class="tcur"><\/span>/,'')+
+    '<span class="tp">root@srv</span>:<span class="tpa">/data/models</span>$ <span class="thl">'+cmd.replace(/</g,'&lt;')+'</span>\n'+
+    '<span class="tdi">[来自快捷命令 · '+target+']</span>\n<span class="tok">执行中...</span>\n<span class="tcur"></span>';
+  b.scrollTop=b.scrollHeight;
+  setTimeout(function(){
+    b.innerHTML=b.innerHTML.replace('<span class="tok">执行中...</span>','<span class="tok">完成 · 退出码 0 · 1.24s</span>');
+    b.scrollTop=b.scrollHeight;
+  },900);
+}
+
+function openLog(name,state,code){
+  document.getElementById('logName').textContent=name;
+  var bg=document.getElementById('logBadge');
+  if(state==='run'){bg.className='bex be-run';bg.innerHTML='<span class="material-icons">play_circle</span>运行中 · PID 41287';document.getElementById('logCount').textContent='500 / 500 行';}
+  else if(state==='bad'){bg.className='bex be-bad';bg.innerHTML='<span class="material-icons">error</span>异常退出 · code '+code;document.getElementById('logCount').textContent='500 / 500 行';}
+  else{bg.className='bex be-ok';bg.innerHTML='<span class="material-icons">check_circle</span>正常退出 · code 0';document.getElementById('logCount').textContent='312 / 500 行';}
+  var L=[];
+  if(state==='bad'){
+    L=['<span class="tdi">[内存缓存 500 行 · 末尾 10 行]</span>',
+      '06:11:58 [I] start proxy',
+      '06:11:58 [I] proxy added: ssh-tunnel',
+      '06:12:03 [W] heartbeat timeout',
+      '06:12:09 [E] dial tcp 120.55.x.x:7000: connection refused',
+      '06:12:09 [E] retry 1/5 failed',
+      '06:12:19 [E] retry 3/5 failed',
+      '06:12:29 [E] retry 5/5 failed',
+      '<span class="ter">06:12:29 [F] connect to server failed, exit</span>',
+      '<span class="ter">进程以 code 1 退出（异常退出）</span>'];
+  }else if(state==='good'){
+    L=['<span class="tdi">[内存缓存 312 行 · 末尾 7 行]</span>',
+      '23:39:51 [I] shutdown requested by user',
+      '23:39:51 [I] BT session saved',
+      '23:39:52 [I] closing torrents ... done',
+      '23:39:52 [I] flushing resume data',
+      '<span class="tok">23:40:01 [I] shutdown complete</span>',
+      '<span class="tok">进程以 code 0 退出（正常退出）</span>'];
+  }else{
+    L=['<span class="tdi">[内存缓存 500 行 · 实时追加 · 末尾 12 行]</span>',
+      '<span class="tdi">load_tensors: using device CUDA0 (P104-100) - 8109 MiB free</span>',
+      '<span class="tok">load_tensors: offloaded 37/37 layers to GPU</span>',
+      '<span class="twa">load_tensors:  CUDA0 model buffer size =  4732.55 MiB</span>',
+      '<span class="tok">srv  load_model: model loaded in 12.402 s</span>',
+      '<span class="tok">main: server is listening on http://0.0.0.0:8080</span>',
+      '06:41:02 [INFO] POST /v1/chat/completions 200 - 412ms - 128 tok/s',
+      '06:41:09 [INFO] POST /v1/chat/completions 200 - 388ms - 131 tok/s',
+      '06:41:17 [INFO] POST /v1/chat/completions 200 - 401ms - 129 tok/s',
+      '06:41:26 [WARN] slot 3 released, kv cache reclaimed 212 MiB',
+      '06:41:31 [INFO] POST /v1/chat/completions 200 - 396ms - 130 tok/s',
+      '06:41:44 [INFO] POST /health 200 - 0ms'];
+  }
+  var b=document.getElementById('logBody');
+  b.innerHTML=L.join('\n');b.scrollTop=b.scrollHeight;
+  openSheet('shLog');
+}
+
+/* 竖直进度条实时跳动 */
+var base=[34,62,88,54];
+setInterval(function(){
+  document.querySelectorAll('.vb-f[data-i]').forEach(function(f){
+    var i=+f.dataset.i;
+    var v=Math.max(2,Math.min(99,base[i]+Math.round((Math.random()-.5)*(i===2?9:7))));
+    f.style.height=v+'%';
+    var vt=f.closest('.vb').querySelector('.vb-v');
+    if(vt)vt.textContent=v+'%';
+    base[i]=v;
+  });
+},2000);
+
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeDD();
+  ['shLog','shFile','shSvc','shCmd','shDl','shDg'].forEach(closeSheet);}});
+</script>
+</body>
+</html>
