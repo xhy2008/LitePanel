@@ -1,0 +1,235 @@
+package api_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"litepanel/internal/api"
+	"litepanel/internal/auth"
+	"litepanel/internal/store"
+)
+
+const cookieName = api.SessionCookieName
+
+type clock struct{ now time.Time }
+
+func (c *clock) Now() time.Time          { return c.now }
+func (c *clock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+type harness struct {
+	t        *testing.T
+	handler  http.Handler
+	sessions *auth.SessionStore
+	token    string
+	clock    *clock
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "a.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	clk := &clock{now: time.Unix(1_800_000_000, 0)}
+	hash, err := auth.HashPassword("test-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SqlDB().Exec(
+		`INSERT INTO settings(key,value,updated_at) VALUES('password_hash',?,1)`, hash,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sessions := auth.NewSessionStore(db, clk.Now, 7*24*time.Hour)
+	limiter := auth.NewLoginLimiter(clk.Now, 5, 10*time.Minute)
+
+	h := &harness{t: t, sessions: sessions, clock: clk}
+	h.handler = api.NewRouter(nil, api.AuthDeps{
+		DB:       db,
+		Sessions: sessions,
+		Limiter:  limiter,
+		Clock:    clk.Now,
+	})
+
+	tok, err := sessions.Issue("ua", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.token = tok
+	return h
+}
+
+func (h *harness) do(method, path string, withCookie bool, xrw, body, remoteIP string) *http.Response {
+	h.t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	if withCookie {
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: h.token})
+	}
+	if xrw != "" {
+		req.Header.Set("X-Requested-With", xrw)
+	}
+	if remoteIP != "" {
+		req.RemoteAddr = remoteIP + ":1234"
+	}
+	w := httptest.NewRecorder()
+	h.handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func (h *harness) get(path string, cookies ...*http.Cookie) *http.Response {
+	h.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	h.handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func (h *harness) login(password, remoteIP string) *http.Response {
+	h.t.Helper()
+	body, _ := json.Marshal(map[string]string{"password": password})
+	return h.do(http.MethodPost, "/api/login", false, "litepanel", string(body), remoteIP)
+}
+
+func TestAPIRoutesRequireAuth(t *testing.T) {
+	h := newHarness(t)
+	for _, p := range []string{"/api/settings", "/api/services", "/api/commands", "/api/metrics/snapshot", "/api/ping"} {
+		if resp := h.get(p); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("未登录访问 %s 应 401, got %d", p, resp.StatusCode)
+		}
+	}
+}
+
+func TestAuthenticatedRequestPasses(t *testing.T) {
+	h := newHarness(t)
+	resp := h.get("/api/ping", &http.Cookie{Name: cookieName, Value: h.token})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("已登录应 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestGarbageCookieIsUnauthorized(t *testing.T) {
+	h := newHarness(t)
+	resp := h.get("/api/ping", &http.Cookie{Name: cookieName, Value: strings.Repeat("f", 64)})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("伪造 cookie 应 401, got %d", resp.StatusCode)
+	}
+}
+
+// CSRF：所有非 GET 请求必须带 X-Requested-With: litepanel。
+func TestNonGETNeedsXHRHeader(t *testing.T) {
+	h := newHarness(t)
+	cases := []struct {
+		name string
+		xrw  string
+		want int
+	}{
+		{"缺失该头", "", http.StatusForbidden},
+		{"值是别的框架惯例", "XMLHttpRequest", http.StatusForbidden},
+		{"值正确", "litepanel", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := h.do(http.MethodPost, "/api/ping", true, tc.xrw, "{}", "127.0.0.1")
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// 登录接口自身不需要 cookie，但失败 5 次后按 IP 锁定，
+// 即使密码正确也返回 429；锁定窗口过后恢复。
+func TestLoginLockout(t *testing.T) {
+	h := newHarness(t)
+	const ip = "100.64.0.9"
+	for i := 1; i <= 5; i++ {
+		if resp := h.login("wrong-password", ip); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("第 %d 次错误密码应 401, got %d", i, resp.StatusCode)
+		}
+	}
+	if resp := h.login("test-password", ip); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("锁定后即使密码正确也应 429, got %d", resp.StatusCode)
+	}
+	// 别的 IP 不受影响。
+	if resp := h.login("test-password", "100.64.0.10"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("其他 IP 不应被锁定, got %d", resp.StatusCode)
+	}
+	h.clock.Advance(10*time.Minute + time.Second)
+	if resp := h.login("test-password", ip); resp.StatusCode != http.StatusOK {
+		t.Fatalf("锁定窗口过后应可登录, got %d", resp.StatusCode)
+	}
+}
+
+// Cookie 必须 HttpOnly + SameSite=Lax + Path=/。
+func TestLoginSetsHardenedCookie(t *testing.T) {
+	h := newHarness(t)
+	resp := h.login("test-password", "100.64.0.20")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("登录应成功, got %d", resp.StatusCode)
+	}
+	sc := resp.Header.Get("Set-Cookie")
+	for _, want := range []string{cookieName + "=", "HttpOnly", "SameSite=Lax", "Path=/"} {
+		if !strings.Contains(sc, want) {
+			t.Errorf("Set-Cookie 应含 %q, got %q", want, sc)
+		}
+	}
+}
+
+func TestLoginFailureBodyIsUniform(t *testing.T) {
+	h := newHarness(t)
+	resp := h.login("wrong-password", "100.64.0.30")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("应 401, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("错误响应应为 JSON: %v", err)
+	}
+	if body["code"] == nil || body["message"] == nil {
+		t.Fatalf("错误体应含 code 与 message, got %v", body)
+	}
+}
+
+// 改密后旧会话必须全部失效（RevokeAll 的对外承诺）。
+func TestRevokeAllInvalidatesCookie(t *testing.T) {
+	h := newHarness(t)
+	if resp := h.get("/api/ping", &http.Cookie{Name: cookieName, Value: h.token}); resp.StatusCode != 200 {
+		t.Fatal("前置条件：token 应有效")
+	}
+	if err := h.sessions.RevokeAll(); err != nil {
+		t.Fatal(err)
+	}
+	if resp := h.get("/api/ping", &http.Cookie{Name: cookieName, Value: h.token}); resp.StatusCode != 401 {
+		t.Fatalf("RevokeAll 后应 401, got %d", resp.StatusCode)
+	}
+}
+
+// POST /api/logout 清 cookie 并使会话失效。
+func TestLogoutClearsSession(t *testing.T) {
+	h := newHarness(t)
+	resp := h.do(http.MethodPost, "/api/logout", true, "litepanel", "", "100.64.0.40")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("登出应 200, got %d", resp.StatusCode)
+	}
+	if sc := resp.Header.Get("Set-Cookie"); !strings.Contains(sc, "Max-Age=0") {
+		t.Errorf("登出应下发过期 cookie, got %q", sc)
+	}
+	if resp := h.get("/api/ping", &http.Cookie{Name: cookieName, Value: h.token}); resp.StatusCode != 401 {
+		t.Fatalf("登出后旧 token 应失效, got %d", resp.StatusCode)
+	}
+}

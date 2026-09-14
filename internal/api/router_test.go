@@ -16,7 +16,7 @@ func TestEmbedServesIndexHTML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("webdist.Dist: %v", err)
 	}
-	r := api.NewRouter(sub)
+	r := api.NewRouter(sub, api.AuthDeps{})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()

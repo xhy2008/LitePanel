@@ -7,17 +7,63 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"litepanel/internal/auth"
+	"litepanel/internal/store"
 )
 
-// NewRouter 返回面板的根路由：API 在后续任务中挂载，
-// 其余路径交给嵌入的前端产物，未知路径回退到 index.html（SPA 前端路由）。
-func NewRouter(static fs.FS) chi.Router {
+// SessionCookieName 是承载会话 token 的 cookie 名。
+const SessionCookieName = "lp_session"
+
+// AuthDeps 是认证相关依赖。
+type AuthDeps struct {
+	DB           *store.DB
+	Sessions     *auth.SessionStore
+	Limiter      *auth.LoginLimiter
+	Clock        func() time.Time
+	SessionTTL   time.Duration
+	SecureCookie bool
+}
+
+// NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
+// deps.Sessions 为 nil 时 API 一律返回 501（仅用于早期骨架测试）。
+func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 	r := chi.NewRouter()
-	fileServer := http.FileServerFS(static)
-	r.Handle("/*", spaHandler(static, fileServer))
+
+	authed := func(h http.HandlerFunc) http.HandlerFunc { return requireAuth(deps)(h) }
+
+	r.Route("/api", func(a chi.Router) {
+		// 面板所有非 GET 请求都必须带 X-Requested-With（含登录本身）。
+		a.Use(csrfGuard)
+		if deps.Sessions == nil || deps.Limiter == nil {
+			a.HandleFunc("/*", notImplemented)
+			a.HandleFunc("/", notImplemented)
+			return
+		}
+		a.Post("/login", handleLogin(deps))
+		a.Post("/logout", handleLogout(deps))
+		ping := func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		}
+		a.Get("/ping", authed(ping))
+		a.Post("/ping", authed(ping))
+		// 兜底：/api 下的其他路径先过鉴权，再回 501，
+		// 避免未登录访问未实现接口被误判为 404/200。
+		a.Handle("/*", authed(notImplemented))
+	})
+
+	if static != nil {
+		fileServer := http.FileServerFS(static)
+		r.Handle("/*", spaHandler(static, fileServer))
+	}
 	return r
+}
+
+func notImplemented(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "not_implemented", "该接口尚未实现："+r.URL.Path)
 }
 
 // spaHandler 命中不到真实文件时返回 index.html，让前端路由接管。
