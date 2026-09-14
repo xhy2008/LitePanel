@@ -1,24 +1,45 @@
+/* 设计令牌：取值以 UI原型-电脑版-v3.html / UI原型-手机版-v2.html 的 :root 为准。 */
 :root {
-  --bg: #0f1115;
-  --bg-elev: #171a21;
-  --border: #262b36;
-  --text: #e6e9ef;
-  --text-dim: #8b93a7;
-  --accent: #3b82f6;
-  --ok: #22c55e;
-  --err: #ef4444;
-  --warn: #f59e0b;
-  --radius: 8px;
-  --gap: 12px;
+  --accent: #ff6600;
+  --accent-2: #ff8534;
+
+  --bg: #0e1116;
+  --bg-elev: #141920;
+  --card: #191f27;
+  --card-2: #202832;
+
+  --text: #e6ebf2;
+  --text-dim: #95a2b4;
+  --text-mute: #5f6c7f;
+
+  --border: #252e39;
+  --border-soft: #1e252e;
+
+  --ok: #2ecc71;
+  --warn: #f5a623;
+  --err: #ff4d4f;
+  --info: #3ba7ff;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius: var(--radius-sm);
+
+  /* 布局尺寸（原型：60px 图标条 / 128px 仪表轨） */
   --nav-w: 60px;
   --rail-w: 128px;
   --topbar-h: 58px;
+  --tabbar-h: 56px;
+  --gap: 12px;
 }
 
 [data-theme='light'] {
   --bg: #f5f6f8;
   --bg-elev: #ffffff;
-  --border: #dfe3ea;
+  --card: #ffffff;
+  --card-2: #f0f2f5;
   --text: #1a1d24;
   --text-dim: #5b6472;
+  --text-mute: #8b93a7;
+  --border: #dfe3ea;
+  --border-soft: #e8ebf0;
 }

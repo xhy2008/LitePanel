@@ -46,7 +46,10 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			return
 		}
 		a.Post("/login", handleLogin(deps))
-		a.Post("/logout", handleLogout(deps))
+		// /api/me 不套鉴权：未登录也要返 200 + {authenticated:false}。
+		a.Get("/me", handleMe(deps))
+		a.Post("/logout", authed(handleLogout(deps)))
+		a.Post("/password", authed(handleChangePassword(deps)))
 		ping := func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		}

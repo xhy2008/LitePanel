@@ -52,9 +52,30 @@ func requireAuth(deps AuthDeps) func(http.HandlerFunc) http.HandlerFunc {
 				writeError(w, http.StatusUnauthorized, "unauthorized", "会话无效或已过期")
 				return
 			}
+			// 强制改密闸门：初始密码未换前只开放改密与登出，
+			// 其余 API 一律 403 + must_change_password，前端据此弹改密框。
+			if !allowedDuringMustChange(r) {
+				if must, err := auth.MustChangePassword(deps.DB); err == nil && must {
+					writeError(w, http.StatusForbidden, "must_change_password",
+						"请先修改初始密码")
+					return
+				}
+			}
 			next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, sess)))
 		}
 	}
+}
+
+// mustChangeAllowedPaths 是强制改密期间仍可达的路径；
+// 漏掉任何一个都会把用户锁死在改密死循环里。
+var mustChangeAllowedPaths = map[string]bool{
+	"/api/me":       true,
+	"/api/password": true,
+	"/api/logout":   true,
+}
+
+func allowedDuringMustChange(r *http.Request) bool {
+	return mustChangeAllowedPaths[r.URL.Path]
 }
 
 // SessionFrom 取出中间件注入的会话，不存在返回 nil。
