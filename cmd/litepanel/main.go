@@ -20,6 +20,7 @@ import (
 	"litepanel/internal/config"
 	"litepanel/internal/store"
 	"litepanel/internal/webdist"
+	"litepanel/internal/ws"
 )
 
 func main() {
@@ -61,8 +62,10 @@ func main() {
 	}
 
 	addr := resolveListen(cfg, *listenOverride)
+	hub := ws.NewHub()
 	deps := api.AuthDeps{
 		DB:           db,
+		Hub:          hub,
 		Sessions:     auth.NewSessionStore(db, time.Now, 7*24*time.Hour),
 		Limiter:      auth.NewLoginLimiter(time.Now, 5, 10*time.Minute),
 		Clock:        time.Now,

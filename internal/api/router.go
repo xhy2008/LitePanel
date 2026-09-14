@@ -13,6 +13,7 @@ import (
 
 	"litepanel/internal/auth"
 	"litepanel/internal/store"
+	"litepanel/internal/ws"
 )
 
 // SessionCookieName 是承载会话 token 的 cookie 名。
@@ -26,6 +27,7 @@ type AuthDeps struct {
 	Clock        func() time.Time
 	SessionTTL   time.Duration
 	SecureCookie bool
+	Hub          *ws.Hub
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -55,11 +57,27 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		a.Handle("/*", authed(notImplemented))
 	})
 
+	if deps.Hub != nil {
+		r.Handle("/ws", deps.Hub.Handler(wsAuth(deps)))
+	}
+
 	if static != nil {
 		fileServer := http.FileServerFS(static)
 		r.Handle("/*", spaHandler(static, fileServer))
 	}
 	return r
+}
+
+// wsAuth 把 WS 握手鉴权委托给会话存储（cookie 与 HTTP 一致）。
+func wsAuth(deps AuthDeps) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		c, err := r.Cookie(SessionCookieName)
+		if err != nil || c.Value == "" {
+			return false
+		}
+		_, ok, err := deps.Sessions.Validate(c.Value)
+		return err == nil && ok
+	}
 }
 
 func notImplemented(w http.ResponseWriter, r *http.Request) {
