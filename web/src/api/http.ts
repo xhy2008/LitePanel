@@ -4,6 +4,8 @@ export interface ApiError {
   message: string;
   status: number;
   detail?: string;
+  // 429 时后端给的 Retry-After 秒数；登录页据此禁用提交。
+  retryAfter?: number;
 }
 
 export interface LocationLike {
@@ -53,6 +55,10 @@ export function createApi(deps: HttpDeps) {
         status: res.status,
         detail: payload?.detail,
       };
+      const retryAfter = Number(res.headers?.get?.('Retry-After'));
+      if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
+        err.retryAfter = Math.round(retryAfter);
+      }
       // 会话过期 → 去登录并记住来路；登录自身的 401 不跳，否则永远进不去。
       if (res.status === 401 && !path.endsWith('/api/login')) {
         const next = encodeURIComponent(location.pathname + location.search);

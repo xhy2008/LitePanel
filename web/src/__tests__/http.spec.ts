@@ -71,6 +71,20 @@ describe('api/http', () => {
     });
   });
 
+  it('429 时把 Retry-After 秒数带进错误对象（登录页据此禁用提交）', async () => {
+    fetchMock.mockResolvedValue({
+      status: 429,
+      ok: false,
+      json: async () => ({ code: 'locked', message: '稍后再试' }),
+      headers: new Headers({ 'Retry-After': '600' }),
+    });
+    const api = createApi({ fetch: fetchMock, location });
+    await expect(api.post('/api/login', { password: 'x' })).rejects.toMatchObject({
+      code: 'locked',
+      retryAfter: 600,
+    });
+  });
+
   it('204 无体响应返回 null', async () => {
     fetchMock.mockResolvedValue({ status: 204, ok: true, json: async () => ({}) });
     const api = createApi({ fetch: fetchMock, location });

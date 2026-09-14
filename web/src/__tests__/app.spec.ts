@@ -26,8 +26,13 @@ describe('路由表', () => {
     expect(login?.component).toBeTruthy();
   });
 
-  it('外壳路由的组件是 AppShell', () => {
+  // 外壳在 App.vue 里做断点分支，父路由不带 component；
+  // 若误删 children 或写错路径，这里会红。
+  it('父路由不带 component，五个视图都是懒加载函数', () => {
     expect(shell).toBeTruthy();
-    expect((shell as { redirect?: unknown }).redirect).toBeUndefined();
+    expect((shell as { component?: unknown }).component).toBeUndefined();
+    for (const c of children.filter((c) => c.name)) {
+      expect(typeof (c as { component?: unknown }).component).toBe('function');
+    }
   });
 });
