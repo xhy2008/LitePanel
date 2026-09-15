@@ -85,3 +85,23 @@ func num(s string) float64 {
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
 }
+
+// 磁盘：与 df -h 对照（M2-T3 人工验收项）。
+func TestManualCompareDisk(t *testing.T) {
+	if os.Getenv("LITEPANEL_MANUAL") == "" {
+		t.Skip("人工对照：LITEPANEL_MANUAL=1 go test ./internal/metrics/ -run Compare -v")
+	}
+	ds, err := Disks(DefaultProcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("面板枚举出 %d 块盘：", len(ds))
+	for _, d := range ds {
+		t.Logf("  %-22s %-18s %6.1f%%  used=%.1f/%.1f MB",
+			d.Mountpoint, d.Device, d.UsedPercent(), mb(d.Used), mb(d.Total))
+	}
+	out, ferr := exec.Command("df", "-h", "-t", "ext4", "-t", "erofs", "-t", "f2fs").Output()
+	if ferr == nil {
+		t.Logf("df -h 对照：\n%s", out)
+	}
+}
