@@ -24,6 +24,9 @@ export function installAuthGuard(router: Router) {
       return auth.loggedIn ? { name: 'quick' } : true;
     }
     if (!auth.loggedIn) {
+      // 防御纵深：即使哪天 bare 又漏了，也绝不把 /login 往 /login 上跳。
+      // 自循环会让 next 每轮自我嵌套，浏览器主线程直接被冻结。
+      if (to.name === 'login') return false;
       return { name: 'login', query: { next: to.fullPath } };
     }
     return true;

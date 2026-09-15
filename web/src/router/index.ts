@@ -15,7 +15,9 @@ const routes: RouteRecordRaw[] = [
       { path: 'settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { title: '设置' } },
     ],
   },
-  { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { title: '登录' } },
+      // bare 必须有：守卫靠它识别“登录页自身”，否则会把它当受保护页
+    // 再往 /login 跳，形成重定向自循环并冻结主线程（实测整页卡死）。
+    { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { title: '登录', bare: true } },
 ];
 
 export function makeRouter() {

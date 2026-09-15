@@ -98,6 +98,13 @@ func notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "not_implemented", "该接口尚未实现："+r.URL.Path)
 }
 
+// looksLikeAsset 以「最后一段是否含扩展名」判断。用启发式而非白名单目录，
+// 是为了让同类问题不会换个目录名就复现。
+func looksLikeAsset(p string) bool {
+	i := strings.LastIndexByte(p, '/')
+	return strings.IndexByte(p[i+1:], '.') > 0
+}
+
 // spaHandler 命中不到真实文件时返回 index.html，让前端路由接管。
 func spaHandler(static fs.FS, fileServer http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -106,6 +113,15 @@ func spaHandler(static fs.FS, fileServer http.Handler) http.Handler {
 			if f, err := static.Open(p); err == nil {
 				_ = f.Close()
 				fileServer.ServeHTTP(w, req)
+				return
+			}
+			// 命中不到、且看起来是静态资源（带扩展名）→ 必须 404。
+			// 绝不能回 index.html：那等于把资源缺失伪装成 200 成功，
+			// 浏览器会因 MIME 不符拒绝把 HTML 当 ES module 执行，
+			// 表现为白屏且不抛任何异常，前端错误捕获完全看不到。
+			// 典型触发：重新构建后 hash 变化，而浏览器还在用缓存的旧 index.html。
+			if looksLikeAsset(p) {
+				http.NotFound(w, req)
 				return
 			}
 		}

@@ -158,3 +158,57 @@ describe('改密界面', () => {
     expect(w.find('.mismatch').exists()).toBe(true);
   });
 });
+
+// 真实路由表下的守卫回归。桩路由里 /login 一直带着 bare:true，而真实路由表
+// 曾漏掉它 —— 守卫于是把 /login 当受保护页：未登录跳 /login?next=/ → 再判未登录
+// → 再跳 /login?next=/login?next=/，next 每轮自我嵌套，主线程冻结（实测标签页
+// 彻底卡死、页面内任何错误捕获都失声）。桩与真实路由不一致是这类 bug 的温床。
+describe('真实路由表下的守卫（回归：重定向自循环冻结页面）', () => {
+  async function bootReal(me: Response, target: string) {
+    apiReturning(() => me);
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({ history: createMemoryHistory(), routes });
+    installAuthGuard(router);
+    // 保险丝：若存在自循环，必须在测试挂死之前掐断并留下证据。
+    let calls = 0;
+    router.beforeEach(() => {
+      calls += 1;
+      return calls > 20 ? false : true;
+    });
+    await router.push(target).catch(() => undefined);
+    await flushPromises();
+    return { router, calls };
+  }
+
+  const anon = () =>
+    new Response(JSON.stringify({ authenticated: false, must_change_password: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('未登录访问 / 停在 /login，next 只包一层', async () => {
+    const { router } = await bootReal(anon(), '/');
+    expect(router.currentRoute.value.path).toBe('/login');
+    expect(router.currentRoute.value.query.next).toBe('/quick');
+  });
+
+  it('未登录直接访问 /login 能渲染登录页，且不产生 next 嵌套', async () => {
+    const { router } = await bootReal(anon(), '/login');
+    expect(router.currentRoute.value.path).toBe('/login');
+    expect(router.currentRoute.value.query.next).toBeUndefined();
+  });
+
+  it('守卫调用次数有界（死循环的量化红线）', async () => {
+    for (const target of ['/', '/login', '/term']) {
+      const { calls } = await bootReal(anon(), target);
+      expect(calls, target).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it('未登录访问 /term 时 next 保留原始路径', async () => {
+    const { router } = await bootReal(anon(), '/term');
+    expect(router.currentRoute.value.path).toBe('/login');
+    expect(router.currentRoute.value.query.next).toBe('/term');
+  });
+});
