@@ -8,3 +8,4 @@ web/coverage/
 # 本机开发用配置与数据，不进仓库
 /config.toml
 /dev/
+.scratch/
