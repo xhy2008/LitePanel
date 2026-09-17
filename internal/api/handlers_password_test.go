@@ -38,6 +38,14 @@ func openDB(t *testing.T) *store.DB {
 
 func newPWEnv(t *testing.T, initial string) *pwEnv {
 	t.Helper()
+	return newPWEnvWith(t, initial, nil)
+}
+
+// newPWEnvWith 允许调用方往 AuthDeps 里追加依赖（如 Metrics）。
+// 只开这一个口子是有意的：所有测试都走同一份真实 AuthDeps 装配，
+// 免得测试桩与真实装配漂移（M1 的冻结 bug 就是这么来的）。
+func newPWEnvWith(t *testing.T, initial string, mutate func(*api.AuthDeps)) *pwEnv {
+	t.Helper()
 	db := openDB(t)
 	if err := auth.SetInitialPassword(db, initial); err != nil {
 		t.Fatal(err)
@@ -48,6 +56,9 @@ func newPWEnv(t *testing.T, initial string) *pwEnv {
 		Sessions: auth.NewSessionStore(db, clk, 24*time.Hour),
 		Limiter:  auth.NewLoginLimiter(clk, 5, 10*time.Minute),
 		Clock:    clk,
+	}
+	if mutate != nil {
+		mutate(&deps)
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {

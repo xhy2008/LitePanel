@@ -9,3 +9,7 @@ web/coverage/
 /config.toml
 /dev/
 .scratch/
+
+# 工具编译产物
+/d6probe
+/tools/d6probe/d6probe

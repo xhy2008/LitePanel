@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -24,6 +26,15 @@ func accessLog(w io.Writer, next http.Handler) http.Handler {
 		rec := &statusWriter{ResponseWriter: rw, status: 0}
 		next.ServeHTTP(rec, r)
 
+		// 连接被 Hijack（WebSocket）之后，底层 TCP 已归协议自己管：
+		// 此处拿到的耗时与状态码都没意义，留一行“← /ws | 200”反而把人
+		// 往错方向引（看着像请求止常返回，实际长连接还在跑）。
+		if rec.hijacked {
+			fmt.Fprintf(w, "↔ %s %s | 连接已被接管（WebSocket 等），不记完成行\n",
+				r.Method, r.URL.Path)
+			return
+		}
+
 		cost := time.Since(start)
 		tag := ""
 		if cost > 2*time.Second {
@@ -40,7 +51,8 @@ func accessLog(w io.Writer, next http.Handler) http.Handler {
 // statusWriter 记录是否写过状态码，用于区分“回了 200”和“一个字都没回”。
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status   int
+	hijacked bool
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -48,6 +60,22 @@ func (w *statusWriter) WriteHeader(code int) {
 		w.status = code
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack 透传给底层。必须显式写：statusWriter 内嵌的是 http.ResponseWriter
+// 接口，方法集里没有 Hijack，gorilla/websocket 的 w.(http.Hijacker) 断言
+// 会直接失败并回 500 —— 于是“一开 -debug 所有 WebSocket 就挂”，
+// 而需要 -debug 的时候恰恰是问题最拧钻的时候。
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("api: 底层 ResponseWriter 不支持 Hijack: %T", w.ResponseWriter)
+	}
+	conn, brw, err := h.Hijack()
+	if err == nil {
+		w.hijacked = true
+	}
+	return conn, brw, err
 }
 
 // Flush 透传给底层，保证 WS 升级与流式响应不被打断。

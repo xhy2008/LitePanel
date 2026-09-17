@@ -46,6 +46,10 @@ type Collector struct {
 	stopCh  chan struct{}
 	stopped bool
 
+	// 按需采样（HTTP 首屏）的节流缓存。
+	cached   *Snapshot
+	cachedAt time.Time
+
 	// liveLoops 是真实存活的循环数（进入 loop 时 +1，退出时 -1）。
 	// 用它而不是"标志位"来验证不泄漏：标志位会被 stopLocked 直接改掉，
 	// 那样的测试只是在断言我自己写的赋值，测不出 goroutine 泄漏。
@@ -82,7 +86,7 @@ func (c *Collector) stopLocked() {
 		close(c.stopCh)
 		c.stopCh = nil
 	}
-	// 释放上一轮快照：长时间无人看时不该把数据一直握在内存里。
+	// 释放上一轮快照（含按需缓存）：长时间无人看时不该把数据一直握在内存里。
 	c.snap = nil
 	if r, ok := c.src.(OptionalResetter); ok {
 		r.Reset()
@@ -185,3 +189,59 @@ func (c *Collector) Latest() *Snapshot {
 
 // liveLoopCount 供测试验证不泄漏 goroutine。
 func (c *Collector) liveLoopCount() int { return int(c.liveLoops.Load()) }
+
+// OnDemand 给 HTTP 首屏用：采集器停着（无 WS 订阅者）时也能拿到一份数据。
+//
+// 两条路径：
+//   - 有实时快照（采集器在跑）：直接给，绝不另起采样。并发采样会互抢
+//     CPU 差分基线，把 WS 帧的读数一起弄脏；
+//   - 采集器停着：采一轮并按 interval 节流。
+//
+// 节流必须有：这个接口的语义是"给我一份数据"，不设上限的话任何客户端
+// 轮询它都会变成对 /proc 的读放大 —— 一个自称轻量的面板，自己却成了
+// 能把机器压忙的东西，跟设计初衷正好相反。
+//
+// 节流周期复用 interval 而不是另开一个参数：比一轮采集更快没有意义，
+// 且会产生"HTTP 数据比 WS 帧更新"这种自相矛盾的读数。
+func (c *Collector) OnDemand() (*Snapshot, error) {
+	if s := c.Latest(); s != nil {
+		return s, nil
+	}
+
+	c.mu.Lock()
+	// 双重检查：取锁期间可能已经有 WS 订阅进来、采集器刚出了帧。
+	if c.snap != nil {
+		cp := *c.snap
+		c.mu.Unlock()
+		return &cp, nil
+	}
+	if c.cached != nil && time.Since(c.cachedAt) < c.interval {
+		cp := *c.cached
+		c.mu.Unlock()
+		return &cp, nil
+	}
+	c.mu.Unlock()
+
+	// 采样在锁外做：一次 /proc 遍历要几毫秒，持锁会把停表/起表
+	// 这些 hub 回调一起堵住。
+	snap, warming, err := c.src.Sample()
+	if err != nil {
+		return nil, err
+	}
+	snap.Seq = 0 // 不占用 WS 帧的序号空间：两个来源的 seq 混在一起会让前端误判丢帧
+	snap.TS = time.Now().Unix()
+	snap.Warming = warming
+
+	c.mu.Lock()
+	// 期间采集器若已跑起来，优先给实时数据，别让首屏拿到一份"更旧"的。
+	if c.snap != nil {
+		cp := *c.snap
+		c.mu.Unlock()
+		return &cp, nil
+	}
+	cp := snap
+	c.cached = &cp
+	c.cachedAt = time.Now()
+	c.mu.Unlock()
+	return &cp, nil
+}

@@ -33,6 +33,9 @@ type AuthDeps struct {
 	Debug bool
 	// LogWriter 是访问日志的去向；nil 则不记。测试注入 bytes.Buffer。
 	LogWriter io.Writer
+	// Metrics 为 nil 时指标接口返回 501（不返回空 200 ————
+	// 空壳会被前端渲染成"各项 0%"，看起来像机器空闲）。
+	Metrics MetricsSource
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -66,6 +69,9 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		}
 		a.Get("/ping", authed(ping))
 		a.Post("/ping", authed(ping))
+		if deps.Metrics != nil {
+			a.Get("/metrics/snapshot", authed(handleMetricsSnapshot(deps.Metrics)))
+		}
 		// 兜底：/api 下的其他路径先过鉴权，再回 501，
 		// 避免未登录访问未实现接口被误判为 404/200。
 		a.Handle("/*", authed(notImplemented))

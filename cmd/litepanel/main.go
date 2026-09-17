@@ -19,6 +19,7 @@ import (
 	"litepanel/internal/api"
 	"litepanel/internal/auth"
 	"litepanel/internal/config"
+	"litepanel/internal/metrics"
 	"litepanel/internal/store"
 	"litepanel/internal/webdist"
 	"litepanel/internal/ws"
@@ -65,7 +66,11 @@ func main() {
 
 	addr := resolveListen(cfg, *listenOverride)
 	hub := ws.NewHub()
+	// D6：指标采集随 WS 订阅数启停。
+	col := wireMetrics(hub, metrics.NewSystemSource(metrics.DefaultProcDir), time.Second)
+	defer col.Stop()
 	deps := buildDeps(db, cfg, hub, *debug, os.Stderr)
+	deps.Metrics = col
 
 	sub, err := webdist.Dist()
 	if err != nil {
@@ -94,7 +99,21 @@ func main() {
 	_ = srv.Shutdown(ctx) // TODO(M4-T5): 此处遍历停止所有托管服务进程组。
 }
 
-// resolveListen 实施 D7：默认只绑 tailscale 地址，探测不到则回落 127.0.0.1。
+// wireMetrics 把采集器接到 hub 的订阅计数上并返回采集器（D6）。
+//
+// 单独成函数是为了让它可测：接线只有一行，但它决定"无人观看时面板是否
+// 真的零开销"。测试必须只调用这里、绝不在测试里自己补一句 OnCount ——
+// 那样即便生产侧漏接，测试也照样全绿。
+//
+// 频道名必须是 metrics.ChannelMetrics 而不是字符串字面量：
+// 写错频道名的话 hub 的回调永远不会命中，采集器就变成"永远在跑"，
+// 而所有单测仍然通过。
+func wireMetrics(hub *ws.Hub, src metrics.Source, interval time.Duration) *metrics.Collector {
+	col := metrics.NewCollector(src, hub, interval)
+	hub.OnCount(metrics.ChannelMetrics, col.SetSubscribers)
+	return col
+}
+
 // buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。
 func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io.Writer) api.AuthDeps {
 	return api.AuthDeps{
@@ -110,6 +129,7 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 	}
 }
 
+// resolveListen 实施 D7：默认只绑 tailscale 地址，探测不到则回落 127.0.0.1。
 func resolveListen(cfg config.Config, override string) string {
 	if override != "" {
 		return override
