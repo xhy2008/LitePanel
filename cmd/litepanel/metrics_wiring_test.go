@@ -324,7 +324,15 @@ func TestWebSocketWorksWithDebugAccessLog(t *testing.T) {
 		}
 	}
 	// -debug 下访问日志仍要记到东西（否则修 Hijack 时把日志顺带改没了也不会发现）。
-	if !strings.Contains(log.String(), "/ws") {
-		t.Errorf("访问日志应含 /ws 条目, got %q", log.String())
+	// 断言的是具体行为，不是"日志里有 /ws" —— 后者连"→"那半行都能满足，
+	// 把 hijacked 分支整段废掉也照样绿，等于没测。
+	out := log.String()
+	if !strings.Contains(out, "↔ GET /ws") {
+		t.Errorf("应记下接管行 ↔ /ws, got %q", out)
+	}
+	// 绝不能出现"← /ws | 200"这种完成行：它看着像请求已正常结束，
+	// 而实际长连接还在跑 —— 这正是本 bug 最需要避免的误导。
+	if strings.Contains(out, "← GET /ws") {
+		t.Errorf("被接管的连接不该记完成行, got %q", out)
 	}
 }
