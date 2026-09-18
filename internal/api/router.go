@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"litepanel/internal/auth"
+	"litepanel/internal/logx"
 	"litepanel/internal/store"
 	"litepanel/internal/ws"
 )
@@ -43,7 +44,10 @@ type AuthDeps struct {
 func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 	r := chi.NewRouter()
 
-	if deps.Debug && deps.LogWriter != nil {
+	// logx.Enabled 是构建期常量：发布构建里这个分支连同 accessLog、
+	// statusWriter 一起被编译器消除（D9/§12.1：零开销，不是运行时判断）。
+	// deps.Debug 保留作运行时段位：调试构建里不传 -debug 仍静默。
+	if logx.Enabled && deps.Debug && deps.LogWriter != nil {
 		r.Use(func(next http.Handler) http.Handler {
 			return accessLog(deps.LogWriter, next)
 		})

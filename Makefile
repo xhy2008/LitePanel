@@ -1,6 +1,5 @@
 GO      ?= go
 NPM     ?= npm
-TAGS    ?= release
 LDFLAGS ?= -s -w
 
 # embed 依赖 web 产物：dist 里没有 js 就先构建前端。
@@ -25,8 +24,13 @@ web:
 	cd web && $(NPM) run build
 
 build: $(WEB_STAMP)
-	CGO_ENABLED=1 $(GO) build -tags $(TAGS) -ldflags="$(LDFLAGS)" -o bin/litepanel ./cmd/litepanel
+	CGO_ENABLED=1 $(GO) build -tags release -ldflags="$(LDFLAGS)" -o bin/litepanel ./cmd/litepanel
 
+# 调试构建（§12.1/D9）：logx 真实输出 + 保留符号表。
+# 保留符号不是顺手：debug 构建的存在意义就是排障，pprof/delve 需要符号；
+# 它从来不上生产机，12MB→17MB 的体积差无所谓。
+# 注：命令里的 -tags debug 同时意味着 release 版里的 -debug 运行时段位
+# 只剩“降低 logx 级别”的作用，访问日志在发布产物里根本不存在。
 build-debug: $(WEB_STAMP)
 	CGO_ENABLED=1 $(GO) build -tags debug -o bin/litepanel-debug ./cmd/litepanel
 
@@ -37,6 +41,9 @@ test: test-go test-web
 
 test-go:
 	$(GO) test $(RACE) ./...
+	# 发布/调试两套构建标签都得绿：logx 的双实现与一堆 tag 专属测试
+	# 只在其中一边编译，只测一边等于半个仓库没测。
+	$(GO) test -tags debug $(RACE) ./...
 
 test-web:
 	cd web && $(NPM) run test

@@ -1,3 +1,11 @@
+//go:build debug
+
+// 本文件跑的是"经 NewRouter 接线"的全栈链路：release 构建下
+// accessLog 被 logx.Enabled 编译期剥离，这些断言就没有对象了。
+// statusWriter 本身的行为（含 Hijack 透传）由 accesslog_hijack_test.go
+// 在两种构建下都把关；release 下"整个二进制确实无日志"由
+// cmd/litepanel 的零输出测试把关。
+
 package api_test
 
 import (
@@ -6,30 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	"litepanel/internal/api"
-	"litepanel/internal/auth"
-	"litepanel/internal/ws"
 )
-
-// 排查“某个浏览器白屏、另一个正常”这类问题只有服务端日志能定性：
-// 是请求没到、到了没回、还是回了但浏览器不认。
-// 因此 Debug 模式必须留下 方法/路径/状态/耗时/UA 的访问日志。
-func newDebugRouter(t *testing.T, w *bytes.Buffer, debug bool) http.Handler {
-	t.Helper()
-	db := openDB(t)
-	clk := time.Now
-	return api.NewRouter(nil, api.AuthDeps{
-		DB:        db,
-		Sessions:  auth.NewSessionStore(db, clk, 24*time.Hour),
-		Limiter:   auth.NewLoginLimiter(clk, 5, 10*time.Minute),
-		Clock:     clk,
-		Hub:       ws.NewHub(),
-		Debug:     debug,
-		LogWriter: w,
-	})
-}
 
 func TestDebugRequestLog(t *testing.T) {
 	var log bytes.Buffer

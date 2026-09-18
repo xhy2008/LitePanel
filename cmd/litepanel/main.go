@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"litepanel/internal/api"
 	"litepanel/internal/auth"
 	"litepanel/internal/config"
+	"litepanel/internal/logx"
 	"litepanel/internal/metrics"
 	"litepanel/internal/store"
 	"litepanel/internal/webdist"
@@ -31,9 +31,10 @@ func main() {
 	debug := flag.Bool("debug", false, "打印逐请求访问日志（排查浏览器白屏/请求挂起用）")
 	flag.Parse()
 
-	// 面板自身不写任何日志文件（D9）；stderr 交给 systemd/journald。
-	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("litepanel: ")
+	// 日志接线按构建标签分流（§12.1/D9）：发布构建里下面整段是
+	// io.Discard，标准 log 与 logx 都不产生任何输出。
+	wireLogging(*debug)
+	tuneRuntime()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -61,7 +62,9 @@ func main() {
 		if err := auth.SetInitialPassword(db, pwd); err != nil {
 			fatal("写入初始密码失败: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "litepanel: 一次性初始密码（首次登录后请立即修改）：%s\n", pwd)
+		// R4 例外：这不是运行日志而是面板可用性的最低保障 —— 发布构建
+		// 里若不吐这一行，初始密码就永远没人知道（logx 会被编译掉）。
+		stderrNote("一次性初始密码（首次登录后请立即修改）：%s", pwd)
 	}
 
 	addr := resolveListen(cfg, *listenOverride)
@@ -88,7 +91,7 @@ func main() {
 			fatal("监听 %s 失败: %v", addr, err)
 		}
 	}()
-	log.Printf("已启动，监听 %s", addr)
+	logx.Info("已启动，监听 %s", addr)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -139,7 +142,7 @@ func resolveListen(cfg config.Config, override string) string {
 		if ip := detectIP(); ip != "" {
 			host = ip
 		} else {
-			fmt.Fprintln(os.Stderr, "litepanel: 未探测到 tailscale 地址，回落绑定 127.0.0.1")
+			logx.Info("未探测到 tailscale 地址，回落绑定 127.0.0.1")
 			host = "127.0.0.1"
 		}
 	}
@@ -197,7 +200,9 @@ func defaultConfigPath() string {
 }
 
 func fatal(format string, args ...any) {
-	// 发布构建下唯一保留的输出通道：启动失败必须可见（设计 R4）。
+	// R4 例外：启动失败必须可见。发布构建里标准 log 是 io.Discard，
+	// 唯独这里直写 stderr —— systemd 下启动失败若一个字都不吐，
+	// systemctl status 是一片空白。stderr 归 journald，面板仍不落文件。
 	fmt.Fprintf(os.Stderr, "litepanel: "+format+"\n", args...)
 	os.Exit(1)
 }

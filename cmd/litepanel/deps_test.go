@@ -9,12 +9,18 @@ import (
 
 	"litepanel/internal/auth"
 	"litepanel/internal/config"
+	"litepanel/internal/logx"
 	"litepanel/internal/store"
 	"litepanel/internal/ws"
 )
 
-// -debug 必须把访问日志接上：排查“某浏览器白屏”时，唯一能定性
-// “请求有没有到、哪个请求挂住”的证据就是服务端逐请求日志。
+// -debug 必须把访问日志的接线字段接上：排查“某浏览器白屏”时，
+// 唯一能定性“请求有没有到、哪个请求挂住”的证据就是服务端逐请求日志。
+//
+// 注意两层门（§12.1/D9）：字段接线是运行时的，两种构建都要验；
+// 而“日志真的落笔”只在调试构建存在 —— 发布构建里挂载点被
+// logx.Enabled 编译期剥离，release 下的零日志由 api 包的
+// accesslog_release_test.go 把关。
 func TestBuildDepsWiresAccessLogInDebug(t *testing.T) {
 	db := openTestDB(t)
 	var log bytes.Buffer
@@ -30,8 +36,12 @@ func TestBuildDepsWiresAccessLogInDebug(t *testing.T) {
 
 	srv := newTestServer(t, deps)
 	get(t, srv, "/api/me")
-	if !strings.Contains(log.String(), "/api/me") {
-		t.Errorf("访问日志应含请求路径, got %q", log.String())
+	if logx.Enabled {
+		if !strings.Contains(log.String(), "/api/me") {
+			t.Errorf("调试构建访问日志应含请求路径, got %q", log.String())
+		}
+	} else if log.Len() != 0 {
+		t.Errorf("发布构建不得落任何日志, got %q", log.String())
 	}
 }
 
