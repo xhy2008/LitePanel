@@ -37,11 +37,13 @@ export function createWsClient(opts: WsOptions) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closedByUs = false;
   let status: WsStatus = 'offline';
+  const statusHandlers = new Set<(s: WsStatus) => void>();
 
   function setStatus(s: WsStatus) {
     if (status === s) return;
     status = s;
     opts.onStatus?.(s);
+    for (const h of statusHandlers) h(s);
   }
 
   function subOf(ch: string): Sub {
@@ -194,6 +196,12 @@ export function createWsClient(opts: WsOptions) {
     sendTerm,
     sendControl,
     close,
+    onStatus(h: (s: string) => void) {
+      // 立即发射当前状态
+      h(status);
+      statusHandlers.add(h as (s: WsStatus) => void);
+      return () => statusHandlers.delete(h as (s: WsStatus) => void);
+    },
     get status() {
       return status;
     },
