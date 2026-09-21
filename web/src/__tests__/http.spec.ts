@@ -62,6 +62,23 @@ describe('api/http', () => {
     expect(redirects).toHaveLength(0);
   });
 
+  // 结构性护栏：已经在登录页了就绝不再往 /login 跳。
+  // 真实事故：登录页上的指标请求 401 → assign('/login') → 整页重载
+  // → 再发请求 → 再 401…… 浏览器在登录页疯狂刷屏频闪。
+  // 只例外 '/api/login' 本身不够：任何在裸页上发的受保护请求都能
+  // 踩进同一个循环，而循环的条件在「当前页」而不在「请求路径」。
+  it('已在登录页时 401 绝不再跳转（防整页重载死循环）', async () => {
+    respond(401, { code: 'unauthorized', message: '未登录' });
+    const onLogin = {
+      pathname: '/login',
+      search: '?next=%2Fquick',
+      assign: (p: string) => redirects.push(p),
+    };
+    const api = createApi({ fetch: fetchMock, location: onLogin });
+    await expect(api.get('/api/metrics/snapshot')).rejects.toBeTruthy();
+    expect(redirects).toHaveLength(0);
+  });
+
   it('非 2xx 抛出统一错误结构', async () => {
     respond(403, { code: 'csrf', message: '缺少或错误的 X-Requested-With 头', detail: '' });
     const api = createApi({ fetch: fetchMock, location });

@@ -32,7 +32,7 @@ function baseSnap(over: Record<string, unknown> = {}): Snapshot {
     seq: 1,
     ts: 1730000000000,
     warming: false,
-    cpu: { percent: 45.7, cores: 4, load1: 0.5, load5: 0.4, load15: 0.1 },
+    cpu: { percent: 45.7, cores_total: 4, load1: 0.5, load5: 0.4, load15: 0.1 },
     mem: {
       total: 12e9,
       available: 4e9,
@@ -202,5 +202,23 @@ describe('attachMetrics', () => {
 
     stop1();
     stop2();
+  });
+  // 首屏快照失败不能拖垮整条管道。
+  // 真实场景：登录页上 snapshot 可能因瞬时故障失败，若不 catch 掉，
+  // attachMetrics 直接 reject —— 调用方的 .then() 不执行、WS 也永不订阅，
+  // 面板从此再不会更新，而且还会留下一个未处理的 promise rejection。
+  it('首屏快照失败仍要建立 WS 订阅', async () => {
+    const feed = makeFeed();
+    const boom = vi.fn(async () => {
+      throw new Error('503');
+    });
+    await expect(
+      attachMetrics({ fetchSnap: boom, wsClient: feed.client }),
+    ).resolves.toBeTypeOf('function');
+
+    // WS 频道照样订上了
+    expect(feed.client.subscribe).toHaveBeenCalledWith('metrics', expect.any(Function));
+    // 拿不到快照时保持空态（画 --），而不是留脏数据
+    expect(metricsState.value.snapshot).toBeNull();
   });
 });

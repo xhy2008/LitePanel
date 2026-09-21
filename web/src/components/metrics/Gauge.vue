@@ -54,7 +54,7 @@ const displayValue = computed(() => {
     </svg>
     <div class="g-c">
       <div class="g-v">
-        {{ displayValue }}<small v-if="!unavailable">%</small>
+        {{ displayValue }}<small v-if="!unavailable && safePct !== null">%</small>
       </div>
       <div class="g-n">{{ name }}</div>
       <div class="g-ua" v-if="unavailable">不可用</div>

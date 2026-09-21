@@ -24,21 +24,27 @@ export interface MemStat {
 
 export interface CpuStat {
   percent: number | null;
-  cores: number;
+  // 逐核占用百分比数组，采集器首次差分未建立时省略。
+  cores?: number[];
   load1: number;
   load5: number;
   load15: number;
+  cores_total: number;
 }
 
+// 利用率与显存共用同一个 Go 类型（GPUStat），语义不通用两个字段区分。
+// Available=false 时 Percent 为 null，并带 reason 供仪表写诊断。
 export interface GpuStat {
   available: boolean;
-  percent: number;
-  vram_used: number;
-  vram_total: number;
-  vram_percent: number;
-  temp_c: number;
-  power_w: number;
-  reason: string;
+  percent: number | null;
+  used?: number;
+  total?: number;
+  name?: string;
+  reason?: string;
+  // 以下两项属于 M3（NVML）范围：后端现在还不返回，可选并在缺席时不显示。
+  // 原型的 GPU 格确实要求「67°C 142W」，届时由 NVML 采集器补上。
+  temp_c?: number;
+  power_w?: number;
 }
 
 export interface Snapshot {
@@ -49,5 +55,6 @@ export interface Snapshot {
   mem: MemStat | null;
   disks: DiskUsage[];
   gpu: GpuStat | null;
+  // NVML 不可用时整体为 null（不是 available:false）。
   vram: GpuStat | null;
 }

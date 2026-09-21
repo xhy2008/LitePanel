@@ -74,7 +74,9 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		a.Get("/ping", authed(ping))
 		a.Post("/ping", authed(ping))
 		if deps.Metrics != nil {
-			a.Get("/metrics/snapshot", authed(handleMetricsSnapshot(deps.Metrics)))
+			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。
+			// 未登录时前端 attachMetrics 拉 snapshot 不再 401 → 不再刷屏。
+			a.Get("/metrics/snapshot", handleMetricsSnapshot(deps.Metrics))
 		}
 		// 兜底：/api 下的其他路径先过鉴权，再回 501，
 		// 避免未登录访问未实现接口被误判为 404/200。

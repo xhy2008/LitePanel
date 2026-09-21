@@ -59,8 +59,16 @@ export function createApi(deps: HttpDeps) {
       if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
         err.retryAfter = Math.round(retryAfter);
       }
-      // 会话过期 → 去登录并记住来路；登录自身的 401 不跳，否则永远进不去。
-      if (res.status === 401 && !path.endsWith('/api/login')) {
+      // 会话过期 → 去登录并记住来路。两种情况不跳：
+      //   1. 登录接口自身的 401（密码错），跳了永远进不去；
+      //   2. 已经在登录页 —— 否则 assign 会整页重载，重新挂载又发一次
+      //      拿 401 的请求，浏览器就在登录页上无限刷屏频闪（实测过）。
+      // 护栏必须看「当前在哪个页」，只看请求路径拦不住这一类。
+      if (
+        res.status === 401 &&
+        !path.endsWith('/api/login') &&
+        location.pathname !== LOGIN_PATH
+      ) {
         const next = encodeURIComponent(location.pathname + location.search);
         location.assign(`${LOGIN_PATH}?next=${next}`);
       }

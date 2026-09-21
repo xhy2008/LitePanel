@@ -37,6 +37,16 @@ describe('Gauge', () => {
     expect(w.text()).toContain('CPU');
   });
 
+  // 无数据时不得拼出 '--%'：没测到百分号就等于没测到单位。
+  // toContain('--') 对 '--%' 同样成立，正是这个洞让它漏了过去。
+  it('无数据时不出现孤立的百分号', () => {
+    for (const empty of [undefined, null]) {
+      const w = mount(Gauge, { props: { name: 'CPU', value: empty } });
+      expect(w.find('.g-v').text()).toBe('--');
+      expect(w.find('.g-v').text()).not.toContain('%');
+    }
+  });
+
   it('value=null 显示 --', () => {
     const w = mount(Gauge, { props: { name: '内存', value: null } });
     expect(w.text()).toContain('--');

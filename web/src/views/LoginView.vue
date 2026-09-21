@@ -2,6 +2,11 @@
 import { computed, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
+import { useBreakpoint } from '../composables/useBreakpoint';
+import { metricsState } from '../composables/useMetrics';
+import MetricsPanel from '../components/metrics/MetricsPanel.vue';
+import MetricTicks from '../components/metrics/MetricTicks.vue';
+import { tickBars } from '../composables/metricsTicks';
 
 // 登录页：单密码框；锁定倒计时来自后端 Retry-After。
 const auth = useAuthStore();
@@ -55,6 +60,14 @@ async function submit() {
     ensureTimer();
   }
 }
+
+// 登录页也显示实时指标（用户要求：监控 API 公开，输密码前先瞄一眼机器）。
+// 数据不自己拉 —— App.vue 挂载时已统一 attachMetrics，这里只读共享单例。
+// 宽度与外壳一致：手机给顶栏竖条，平板/PC 给右侧 128px 仪表栏。
+const { bp } = useBreakpoint();
+const showRail = computed(() => bp.value !== 'phone');
+
+const loginTicks = computed(() => tickBars(metricsState.value.snapshot));
 </script>
 
 <template>
@@ -74,6 +87,12 @@ async function submit() {
         {{ auth.busy ? '登录中…' : '登录' }}
       </button>
     </form>
+
+    <!-- 登录前的实时指标：手机端用顶栏竖条，平/PC 用与主界面同规格的仪表栏 -->
+    <div class="login-dash">
+      <MetricTicks v-if="!showRail" :bars="loginTicks" />
+      <MetricsPanel v-else :snapshot="metricsState.value.snapshot" />
+    </div>
   </div>
 </template>
 
@@ -83,6 +102,28 @@ async function submit() {
   display: grid;
   place-items: center;
   padding: 24px;
+  gap: 24px;
+}
+/* 手机端：竖条放在卡片上方，跟主界面的顶部位置一致 */
+.login:has(.login-dash) {
+  grid-template-rows: auto 1fr;
+  align-content: center;
+  justify-items: center;
+}
+.login-dash {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 平/PC：仪表栏给足 128px 窄栏宽度，与原型 .rail 同宽 */
+@media (min-width: 768px) {
+  .login {
+    grid-template-columns: 1fr;
+  }
+  .login-dash {
+    width: var(--rail-w);
+    max-width: 100%;
+  }
 }
 .card {
   width: 100%;

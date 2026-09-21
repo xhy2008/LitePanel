@@ -45,24 +45,29 @@ export async function attachMetrics(deps: AttachDeps): Promise<() => void> {
   // 覆写全局 cleanups 引用，让后续 attachMetrics 能清理本次
   metricsState.value.cleanups = cleanups;
 
-  // 1. HTTP 快照首屏
-  const snap = await deps.fetchSnap();
-  metricsState.value.snapshot = snap;
-  metricsState.value.connected = true;
-
-  // 2. WS 帧更新
+  // 先订 WS，再取 HTTP 快照垫首屏：反过来会在两步之间丢帧。
   const unsubMetrics = deps.wsClient.subscribe('metrics', (data, _seq) => {
     metricsState.value.snapshot = data as Snapshot;
   });
   cleanups.push(unsubMetrics);
 
-  // 3. WS 连接态
   const unsubStatus = deps.wsClient.onStatus((s) => {
     metricsState.value.connected = s === 'online';
   });
   cleanups.push(unsubStatus);
 
-  // 返回 stop：只做清理，不重置状态值（测试依赖连通性快照在 stop 后仍然可读）
+  // 快照失败不得拖垮整条管道 —— 拿不到就维持空态（画 --），
+  // 但 WS 订阅已经生效；否则一次瞬时拖动就会把面板永久钉死在空数据上。
+  try {
+    metricsState.value.snapshot = await deps.fetchSnap();
+    metricsState.value.connected = true;
+  } catch {
+    metricsState.value.snapshot = null;
+    // 不能只清快照却留着 connected=true：「已连通但无数据」会永久
+    // 显示空白仪表而不是断线态，比明说「没连上」更容易误判。
+    metricsState.value.connected = false;
+  }
+
   return () => {
     cleanups.forEach((fn) => fn());
     cleanups.length = 0;

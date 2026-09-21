@@ -102,12 +102,24 @@ func TestSnapshotDelegatesEveryRequest(t *testing.T) {
 	}
 }
 
-// 未登录绝不能读到系统指标 —— 磁盘容量、挂载点、核数都是有用的侦察信息。
-func TestSnapshotRequiresAuth(t *testing.T) {
-	e := newPWEnv(t, "initial-pass-123")
-	code, _ := e.do("GET", "/api/metrics/snapshot", "")
-	if code != http.StatusUnauthorized {
-		t.Errorf("未登录应 401, got %d", code)
+// 性能监控快照公开：登录页也要画仪表（设计偏离，用户明确要求）。
+// 磁盘容量/挂载点/核数在本产品定位里是「服务面板」对外可见信息，
+// 不算敏感；同时它让登录页不死循环 —— 未登录时 attachMetrics 拉
+// snapshot 不再 401 → 不再 location.assign('/login') 刷屏。
+func TestSnapshotPublicNoAuth(t *testing.T) {
+	src := memSrc()
+	e := newPWEnvWith(t, "initial-pass-123", func(d *api.AuthDeps) { d.Metrics = src })
+
+	// 完全不登录，直接拉快照：必须 200 且能读到数据。
+	code, body := e.do("GET", "/api/metrics/snapshot", "")
+	if code != http.StatusOK {
+		t.Fatalf("未登录应可访问 200, got %d", code)
+	}
+	if src.samples != 1 {
+		t.Errorf("应委托采集器, got %d 次", src.samples)
+	}
+	if body["warming"] == nil {
+		t.Errorf("应返回完整快照, body=%+v", body)
 	}
 }
 
