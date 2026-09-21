@@ -2,9 +2,7 @@
 import { computed, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
-import { useBreakpoint } from '../composables/useBreakpoint';
 import { metricsState } from '../composables/useMetrics';
-import MetricsPanel from '../components/metrics/MetricsPanel.vue';
 import MetricTicks from '../components/metrics/MetricTicks.vue';
 import { tickBars } from '../composables/metricsTicks';
 
@@ -61,17 +59,20 @@ async function submit() {
   }
 }
 
-// 登录页也显示实时指标（用户要求：监控 API 公开，输密码前先瞄一眼机器）。
+// 登录页也显示实时指标（监控 API 公开，输密码前先瞄一眼机器）。
+// 布局：指标条固定在屏幕顶部，与手机版原型的 .topbar 同规格同底色，
+// 登录成功后手机顶栏无缝接着它；登录卡片在其下方居中。
 // 数据不自己拉 —— App.vue 挂载时已统一 attachMetrics，这里只读共享单例。
-// 宽度与外壳一致：手机给顶栏竖条，平板/PC 给右侧 128px 仪表栏。
-const { bp } = useBreakpoint();
-const showRail = computed(() => bp.value !== 'phone');
-
-const loginTicks = computed(() => tickBars(metricsState.value.snapshot));
+const bars = computed(() => tickBars(metricsState.value.snapshot));
 </script>
 
 <template>
   <div class="login">
+    <header class="login-topbar">
+      <span class="lt-brand">LitePanel</span>
+      <MetricTicks :bars="bars" />
+    </header>
+
     <form class="card" @submit.prevent="submit">
       <div class="brand">LitePanel</div>
       <input
@@ -87,12 +88,6 @@ const loginTicks = computed(() => tickBars(metricsState.value.snapshot));
         {{ auth.busy ? '登录中…' : '登录' }}
       </button>
     </form>
-
-    <!-- 登录前的实时指标：手机端用顶栏竖条，平/PC 用与主界面同规格的仪表栏 -->
-    <div class="login-dash">
-      <MetricTicks v-if="!showRail" :bars="loginTicks" />
-      <MetricsPanel v-else :snapshot="metricsState.value.snapshot" />
-    </div>
   </div>
 </template>
 
@@ -100,32 +95,32 @@ const loginTicks = computed(() => tickBars(metricsState.value.snapshot));
 .login {
   min-height: 100%;
   display: grid;
-  place-items: center;
-  padding: 24px;
-  gap: 24px;
-}
-/* 手机端：竖条放在卡片上方，跟主界面的顶部位置一致 */
-.login:has(.login-dash) {
-  grid-template-rows: auto 1fr;
-  align-content: center;
+  /* 顶栏固定占第一行，第二行放居中的登录卡片 */
+  grid-template-rows: var(--topbar-h) 1fr;
   justify-items: center;
+  align-content: start;
 }
-.login-dash {
+/* 与 App.vue 的 .mobile-topbar 同规格：登录前后观感不断层 */
+.login-topbar {
+  grid-row: 1;
+  width: 100%;
+  height: var(--topbar-h);
+  box-sizing: border-box;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  padding: 0 10px;
 }
-/* 平/PC：仪表栏给足 128px 窄栏宽度，与原型 .rail 同宽 */
-@media (min-width: 768px) {
-  .login {
-    grid-template-columns: 1fr;
-  }
-  .login-dash {
-    width: var(--rail-w);
-    max-width: 100%;
-  }
+.lt-brand {
+  flex: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
 }
 .card {
+  align-self: center;
   width: 100%;
   max-width: 320px;
   display: flex;

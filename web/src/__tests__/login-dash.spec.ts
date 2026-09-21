@@ -7,10 +7,10 @@ import { metricsState, resetMetrics } from '../composables/useMetrics';
 import type { Snapshot } from '../api/metrics';
 
 // 设计偏离（用户要求）：性能监控 API 公开，登录页也要能看到仪表盘。
-// 登录页不再是一张光秃秃的密码卡 —— 卡片旁实时显示机器状态，
-// 用户在输密码前就能瞄一眼这台服务器忙不忙。
+// 布局（用户要求）：指标区固定在屏幕顶部，与 UI 原型的顶栏同规格，
+// 登录卡片在其下方居中 —— 不是垫在卡片下面。
 //
-// 数据来源：App.vue 挂载时统一 attachMetrics（HTTP 快照垫首帧 + WS 续帧），
+// 数据来源：App.vue 挂载时已统一 attachMetrics（HTTP 快照垫首帧 + WS 续帧），
 // LoginView 只读共享单例 metricsState —— 不自建数据管道。
 
 const snap: Snapshot = {
@@ -20,7 +20,9 @@ const snap: Snapshot = {
     total: 1000, available: 500, used: 500, percent: 50,
     swap_total: 0, swap_used: 0, swap_percent: 0,
   },
-  disks: [],
+  disks: [
+    { mountpoint: '/', device: 'a', fstype: 'ext4', total: 1e11, used: 9e10, free: 1e10, percent: 90 },
+  ],
   gpu: null, vram: null,
 };
 
@@ -52,31 +54,40 @@ describe('登录页性能仪表盘', () => {
     setWidth(1400);
   });
 
-  it('PC：登录表单旁渲染实时仪表栏', async () => {
+  it('顶部指标条 + 登录卡片都在', async () => {
     metricsState.value.snapshot = snap;
     const w = await mountLogin();
     expect(w.find('input[name="password"]').exists()).toBe(true);
-    expect(w.find('.login-dash').exists()).toBe(true);
+    expect(w.find('.login-topbar').exists()).toBe(true);
     expect(w.text()).toContain('42'); // CPU %
     expect(w.text()).toContain('内存');
     w.unmount();
   });
 
-  // 断点分支与主外壳一致（设计 16.1）：手机端不给右栏，给顶栏那种竖条。
-  it('手机：登录页用竖条而不是仪表栏', async () => {
-    setWidth(375);
+  // DOM 顺序即视觉顺序：指标条必须是第一个子元素，才谈得上"固定顶部"。
+  it('指标条排在登录卡片之前（固定顶部，不是垫在下面）', async () => {
     metricsState.value.snapshot = snap;
     const w = await mountLogin();
-    expect(w.find('.vbs').exists()).toBe(true);
-    expect(w.find('.g').exists()).toBe(false);
+    const html = w.html();
+    expect(html.indexOf('login-topbar')).toBeLessThan(html.indexOf('class="card"'));
     w.unmount();
   });
 
-  it('无快照时不崩，环上画 --（设计的首帧空态）', async () => {
+  // 各断点都用同一条顶部竖条：紧凑、高度可控，且与手机版原型顶栏一致。
+  it('手机与 PC 都用顶栏竖条', async () => {
+    for (const width of [375, 1400]) {
+      setWidth(width);
+      metricsState.value.snapshot = snap;
+      const w = await mountLogin();
+      expect(w.find('.login-topbar .vbs').exists()).toBe(true);
+      w.unmount();
+    }
+  });
+
+  it('无快照时不崩，竖条画 --（设计的首帧空态）', async () => {
     const w = await mountLogin();
-    expect(w.find('.login-dash').exists()).toBe(true);
-    // 名字照旧显示，数值一律 --，绝不拿 0 当真实值
-    const vs = w.findAll('.g-v');
+    expect(w.find('.login-topbar').exists()).toBe(true);
+    const vs = w.findAll('.login-topbar .tick-v');
     expect(vs.length).toBeGreaterThan(0);
     for (const el of vs) expect(el.text()).toBe('--');
     w.unmount();
