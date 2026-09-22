@@ -41,6 +41,16 @@ type proc struct {
 	done chan struct{}
 }
 
+// Event 是一次状态变化。API 层订阅它并广播到 services 频道，
+// 前端因此不需要轮询列表。
+type Event struct {
+	ID    int64  `json:"id"`
+	State string `json:"state"`
+	PID   int    `json:"pid"`
+	// 退出信息：nil 表示这次事件不是退出。
+	Exit *ExitInfo `json:"-"`
+}
+
 // Supervisor 负责 command 类型服务的启停与状态落库。
 type Supervisor struct {
 	db    *store.DB
@@ -50,6 +60,62 @@ type Supervisor struct {
 	// 没说进程一退出就要忘掉 —— 崩溃后点开日志恰恰是最重要的用途。
 	last  map[int64]*LogBuf
 	limit int
+
+	// onEvent / onLog 由 API 层挂 WS 广播。放这里而不是让 handler 自己发，
+	// 是因为状态变化大部分来自 watcher（服务自己崩了），handler 根本不在场。
+	//
+	// cbMu 与 mu 必须是两把锁：写日志的路径持有 buf.mu 时要读这两个字段，
+	// 而 OnLog 又要反过来去拿 buf.mu —— 共用 mu 就是 ABBA 死锁。
+	cbMu    sync.Mutex
+	onEvent func(Event)
+	onLog   func(id int64, lines []string)
+}
+
+// OnEvent 挂状态变化回调。传 nil 取消。
+func (s *Supervisor) OnEvent(fn func(Event)) {
+	s.cbMu.Lock()
+	s.onEvent = fn
+	s.cbMu.Unlock()
+}
+
+// OnLog 挂日志追加回调（一批行一次回调，跟环形缓冲的产出粒度一致）。
+func (s *Supervisor) OnLog(fn func(id int64, lines []string)) {
+	s.cbMu.Lock()
+	s.onLog = fn
+	s.cbMu.Unlock()
+	if fn == nil {
+		return
+	}
+	// 已经跑着的服务补挂：回调是在缓冲创建时定的，挂晚了就漏。
+	s.mu.Lock()
+	bufs := make(map[int64]*LogBuf, len(s.procs))
+	for id, p := range s.procs {
+		bufs[id] = p.buf
+	}
+	s.mu.Unlock()
+	// 必须在锁外调：OnAppend 要拿缓冲自己的锁，而写日志的路径正持有它。
+	for id, b := range bufs {
+		id := id
+		b.OnAppend(func(lines []string) { s.logSink(id, lines) })
+	}
+}
+
+func (s *Supervisor) emit(ev Event) {
+	s.cbMu.Lock()
+	fn := s.onEvent
+	s.cbMu.Unlock()
+	if fn != nil {
+		fn(ev)
+	}
+}
+
+func (s *Supervisor) logSink(id int64, lines []string) {
+	s.cbMu.Lock()
+	fn := s.onLog
+	s.cbMu.Unlock()
+	if fn != nil {
+		fn(id, lines)
+	}
 }
 
 // NewSupervisor 建监管器。
@@ -109,6 +175,7 @@ func (s *Supervisor) Start(svc Service) (State, error) {
 	}
 
 	p := &proc{cmd: cmd, buf: buf, done: make(chan struct{})}
+	buf.OnAppend(func(lines []string) { s.logSink(svc.ID, lines) })
 
 	s.mu.Lock()
 	if _, ok := s.procs[svc.ID]; ok {
@@ -140,6 +207,7 @@ func (s *Supervisor) Start(svc Service) (State, error) {
 	if err := SaveState(s.db, svc.ID, st); err != nil {
 		return State{}, err
 	}
+	s.emit(Event{ID: svc.ID, State: st.State, PID: st.PID})
 	return st, nil
 }
 
@@ -168,6 +236,8 @@ func (s *Supervisor) watch(id int64, p *proc) {
 	exit := judgeExit(ws, src)
 	exit.At = time.Now().Unix()
 	_ = SaveState(s.db, id, State{State: StateStopped, Exit: &exit})
+	// 服务自己崩了的时候 handler 根本不在场，事件必须从这里出。
+	s.emit(Event{ID: id, State: StateStopped, Exit: &exit})
 }
 
 // Stop 停服务：自定义停止命令 → SIGTERM 整组 → 宽限期 → SIGKILL 整组。
@@ -198,9 +268,9 @@ func (s *Supervisor) terminate(ctx context.Context, svc Service, p *proc, grace 
 		}
 	}
 
-	_ = SaveState(s.db, svc.ID, State{
-		State: StateStopping, PID: p.cmd.Process.Pid, PGID: p.pgid,
-	})
+	st := State{State: StateStopping, PID: p.cmd.Process.Pid, PGID: p.pgid}
+	_ = SaveState(s.db, svc.ID, st)
+	s.emit(Event{ID: svc.ID, State: st.State, PID: st.PID})
 
 	// 自定义停止命令优先：不少服务只认自己的关停脚本（先摘流量再退出）。
 	if svc.StopCmd != "" {

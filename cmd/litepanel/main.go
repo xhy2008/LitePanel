@@ -20,6 +20,7 @@ import (
 	"litepanel/internal/config"
 	"litepanel/internal/logx"
 	"litepanel/internal/metrics"
+	"litepanel/internal/service"
 	"litepanel/internal/store"
 	"litepanel/internal/webdist"
 	"litepanel/internal/ws"
@@ -74,6 +75,8 @@ func main() {
 	defer col.Stop()
 	deps := buildDeps(db, cfg, hub, *debug, os.Stderr)
 	deps.Metrics = col
+	sup := wireServices(db, hub)
+	deps.Services = sup
 
 	sub, err := webdist.Dist()
 	if err != nil {
@@ -93,13 +96,26 @@ func main() {
 	}()
 	logx.Info("已启动，监听 %s", addr)
 
+	// 顺序是硬要求：先对账收走上次遗留的进程，再 autostart。
+	// 颠倒的话上次没退干净的与新拉起的同时在跑（两个 nginx 抢 80）。
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := bootServices(bootCtx, sup, db); err != nil {
+		logx.Info("启动托管服务: %v", err)
+	}
+	bootCancel()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 关停顺序不能反：先停止接新请求，再把托管服务整组收走。
+	// 反过来会让服务在被关停的过程中仍能收到请求并重新拉起进程。
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx) // TODO(M4-T5): 此处遍历停止所有托管服务进程组。
+	_ = srv.Shutdown(context.Background())
+	if err := sup.Shutdown(ctx); err != nil {
+		logx.Info("关停托管服务: %v", err)
+	}
 }
 
 // wireMetrics 把采集器接到 hub 的订阅计数上并返回采集器（D6）。
@@ -115,6 +131,45 @@ func wireMetrics(hub *ws.Hub, src metrics.Source, interval time.Duration) *metri
 	col := metrics.NewCollector(src, hub, interval)
 	hub.OnCount(metrics.ChannelMetrics, col.SetSubscribers)
 	return col
+}
+
+// wireServices 建监管器并把事件出口接到 hub（services / svclog:{id} 频道）。
+//
+// 与 wireMetrics 同理，单独成函数是为了让"到底接没接"可测：漏接的代价是
+// 前端只能靠轮询，或服务自己崩了 UI 上还显示运行中 —— 都不会让别的测试变红。
+func wireServices(db *store.DB, hub *ws.Hub) *service.Supervisor {
+	sup := service.NewSupervisor(db)
+	// 事件由 supervisor 直接推 hub：状态变化多数来自 watcher，handler 不在场。
+	sup.OnEvent(api.BroadcastServiceEvent(hub))
+	sup.OnLog(api.BroadcastServiceLog(hub))
+	return sup
+}
+
+// bootServices 做启动对账与自启动。
+//
+// 对账在前：上次面板被 kill -9 留下的进程（若还活着）必须先收走，
+// 否则 autostart 会再拉一份，两份抢同一批端口/文件。
+// 单个服务起不来不该拖垮整个面板 —— 记一条日志继续，UI 上如实显示 stopped。
+func bootServices(ctx context.Context, sup *service.Supervisor, db *store.DB) error {
+	if err := sup.Reconcile(ctx); err != nil {
+		return err
+	}
+	list, err := service.List(db)
+	if err != nil {
+		return err
+	}
+	for _, svc := range list {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !svc.Autostart || svc.Kind != service.KindCommand {
+			continue // systemd 单元交给 systemd 自己管（T8）
+		}
+		if _, err := sup.Start(svc); err != nil {
+			logx.Info("自启动 %s 失败: %v", svc.Name, err)
+		}
+	}
+	return nil
 }
 
 // buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。

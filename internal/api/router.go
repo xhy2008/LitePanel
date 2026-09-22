@@ -34,6 +34,10 @@ type AuthDeps struct {
 	Debug bool
 	// LogWriter 是访问日志的去向；nil 则不记。测试注入 bytes.Buffer。
 	LogWriter io.Writer
+	// Services 为 nil 时服务相关接口返回 501（与 Metrics 同样的取舍：
+	// 空实现会让前端以为"一个服务都没有"）。
+	Services ServiceSupervisor
+
 	// Metrics 为 nil 时指标接口返回 501（不返回空 200 ————
 	// 空壳会被前端渲染成"各项 0%"，看起来像机器空闲）。
 	Metrics MetricsSource
@@ -73,6 +77,15 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		}
 		a.Get("/ping", authed(ping))
 		a.Post("/ping", authed(ping))
+		if deps.Services != nil {
+			a.Get("/services", authed(handleServicesList(deps)))
+			a.Post("/services", authed(handleServicesCreate(deps)))
+			a.Patch("/services/{id}", authed(handleServicesUpdate(deps)))
+			a.Delete("/services/{id}", authed(handleServicesDelete(deps)))
+			a.Post("/services/{id}/toggle", authed(handleServiceToggle(deps)))
+			a.Get("/services/{id}/log", authed(handleServiceLog(deps)))
+			a.Delete("/services/{id}/log", authed(handleServiceLogClear(deps)))
+		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。
 			// 未登录时前端 attachMetrics 拉 snapshot 不再 401 → 不再刷屏。
@@ -83,6 +96,9 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		a.Handle("/*", authed(notImplemented))
 	})
 
+	// 事件接线（supervisor -> hub）只在 cmd/litepanel 的 wireServices 里做一次。
+	// 这里再写一遍会让"接没接线"有两个主人：实测删掉 wireServices 里的
+	// OnEvent，接线测试照过 —— 两个主人互相掩盖了漏接。与 wireMetrics 同规。
 	if deps.Hub != nil {
 		r.Handle("/ws", deps.Hub.Handler(wsAuth(deps)))
 	}
