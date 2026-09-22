@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"io/fs"
 	"testing"
 	"testing/fstest"
@@ -14,9 +15,14 @@ func TestMigrateIncremental(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 注入的版本必须避开真实库已有的版本号（迁移按版本号判定是否已应用），
+	// 所以取当前版本 +1 / +2，而不是写死 0002/0003。migrations/ 里加文件
+	// 不必再同步改这两个测试。
+	base := db.Version()
+	next := base + 1
 	v2 := fstest.MapFS{
 		"migrations/0001_init.sql": &fstest.MapFile{Data: []byte(`-- 已经在真实库里，不会再执行`)},
-		"migrations/0002_extra.sql": &fstest.MapFile{Data: []byte(
+		fmt.Sprintf("migrations/%04d_extra.sql", next): &fstest.MapFile{Data: []byte(
 			`CREATE TABLE extra (id INTEGER PRIMARY KEY);`)},
 	}
 
@@ -27,8 +33,8 @@ func TestMigrateIncremental(t *testing.T) {
 	if err := db.Migrate(); err != nil {
 		t.Fatalf("增量迁移失败: %v", err)
 	}
-	if db.Version() != 2 {
-		t.Fatalf("版本应升到 2, got %d", db.Version())
+	if db.Version() != next {
+		t.Fatalf("版本应升到 %d, got %d", next, db.Version())
 	}
 	if !hasTable(t, db.SqlDB(), "extra") {
 		t.Fatal("新表 extra 应存在")
@@ -43,10 +49,12 @@ func TestMigrateIncremental(t *testing.T) {
 func TestMigrateRollbackOnBadSQL(t *testing.T) {
 	db := openStore(t)
 
+	base := db.Version()
 	bad := fstest.MapFS{
-		"migrations/0001_init.sql":  &fstest.MapFile{Data: []byte(`SELECT 1`)},
-		"migrations/0002_bad.sql":   &fstest.MapFile{Data: []byte(`CREATE TABLE ok_once(id); CREATE TABLE ok_once(again);`)},
-		"migrations/0003_after.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE after_it(id);`)},
+		fmt.Sprintf("migrations/%04d_bad.sql", base+1): &fstest.MapFile{
+			Data: []byte(`CREATE TABLE ok_once(id); CREATE TABLE ok_once(again);`)},
+		fmt.Sprintf("migrations/%04d_after.sql", base+2): &fstest.MapFile{
+			Data: []byte(`CREATE TABLE after_it(id);`)},
 	}
 	old := migrationSources
 	migrationSources = fs.FS(bad)
@@ -58,7 +66,7 @@ func TestMigrateRollbackOnBadSQL(t *testing.T) {
 	if hasTable(t, db.SqlDB(), "after_it") {
 		t.Fatal("失败之后的迁移不应继续执行")
 	}
-	if db.Version() != 1 {
-		t.Fatalf("版本应停在 1, got %d", db.Version())
+	if db.Version() != base {
+		t.Fatalf("版本应停在 %d, got %d", base, db.Version())
 	}
 }

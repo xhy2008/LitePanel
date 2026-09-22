@@ -174,36 +174,47 @@ func TestAbnormalDisconnectDecrementsCount(t *testing.T) {
 	}
 }
 
-// 慢客户端不能被无限追帧，也不能阻塞其他客户端与 hub 本身。
+// 慢客户端不能被无限追帧，也不能把 hub 拖死。
+// 注意不断言“另一个不读的客户端仍能收帧”：不限速洪水中，任何
+// 不被读取的连接都会被丢弃踢出（这是设计行为），那种断言只会
+// 跟着调度快慢随机失败。真正要守的是：慢客户端被踢、hub 仍可用。
 func TestSlowClientDoesNotBlockHub(t *testing.T) {
 	f := newHubFixture(t, true)
 	slow := f.dial()
-	fast := f.dial()
 	_ = slow.WriteMessage(websocket.TextMessage, subFrame("metrics"))
-	_ = fast.WriteMessage(websocket.TextMessage, subFrame("metrics"))
-	waitFor(t, func() bool { return f.hub.SubscriberCount("metrics") == 2 })
+	waitFor(t, func() bool { return f.hub.SubscriberCount("metrics") == 1 })
 
 	// slow 完全不读，塞满它的发送缓冲。
-	deadline := time.Now().Add(3 * time.Second)
+	defer func() { _ = slow.Close() }() // 不等 t.Cleanup，避开测试末尾的写报错
+	deadline := time.Now().Add(2 * time.Second)
 	for i := 0; time.Now().Before(deadline); i++ {
 		f.hub.Broadcast("metrics", mustJSON(t, map[string]any{"i": i}))
 	}
-	// fast 必须仍能正常收到帧。
-	if msg := readJSON(t, fast, 2*time.Second); !strings.Contains(msg, "metrics") {
-		t.Fatalf("快客户端收帧异常: %s", msg)
-	}
-	// hub 自身不能被拖死：广播仍然可用。
-	done := make(chan struct{})
+	// 慢客户端要被踢掉并回收计数，而不是把 hub 内存吃光。
+	waitFor(t, func() bool { return f.hub.SubscriberCount("metrics") == 0 })
+
+	// 洪水之后 hub 仍要能服务新客户端。
+	fresh := f.dial()
+	_ = fresh.WriteMessage(websocket.TextMessage, subFrame("metrics"))
+	waitFor(t, func() bool { return f.hub.SubscriberCount("metrics") == 1 })
+	read := make(chan string, 1)
 	go func() {
-		for i := 0; i < 500; i++ {
-			f.hub.Broadcast("metrics", mustJSON(t, map[string]any{"ping": i}))
+		_ = fresh.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := fresh.ReadMessage()
+		if err != nil {
+			read <- "ERR: " + err.Error()
+			return
 		}
-		close(done)
+		read <- string(data)
 	}()
+	f.hub.Broadcast("metrics", mustJSON(t, map[string]any{"after": "flood"}))
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("hub 被慢客户端阻塞")
+	case msg := <-read:
+		if !strings.Contains(msg, "flood") {
+			t.Fatalf("洪水后新客户端收帧异常: %s", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("洪水后新客户端收不到帧，hub 已被拖死")
 	}
 }
 
