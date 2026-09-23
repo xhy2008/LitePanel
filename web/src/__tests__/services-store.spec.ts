@@ -84,6 +84,43 @@ describe('describeService（D21 三态）', () => {
 
   // exit_reason 缺席 = 从没退出过。把它当"正常退出 code 0"会让用户
   // 以为服务跑过一遍又好好退了，实际是一次都没启动。
+  // 面板自己 SIGTERM 停的服务，退出码是 143（128+15）。按 D21 只有两态，
+  // 归 clean 没错，但照搬退出码会显示"正常退出 · code 143" —— 这个数字
+  // 正是面板自己发的信号，读起来却像出了故障。归因要说清楚。
+  it('面板点的停止显示"已停止"，不把 143 当故障', () => {
+    const d = describeService(
+      row({
+        state: 'stopped', pid: 0, exit_reason: 'clean', exit_code: 143,
+        exit_signal: 15, stopped_by: 'user', exit_at: Math.floor(Date.now() / 1000),
+      }),
+    );
+    expect(d.text).toContain('已停止');
+    expect(d.text).not.toContain('143');
+    expect(d.text).not.toContain('正常退出');
+    expect(d.tone).toBe('good');
+  });
+
+  // 面板重启会顺带停掉 CMD 服务（§6.2.1 明说这算正常退出）。用户没点过
+  // 停止却看到"已停止"会以为服务自己挂了，所以要把原因带出来。
+  it('面板关停导致的停止写明原因', () => {
+    const d = describeService(
+      row({
+        state: 'stopped', pid: 0, exit_reason: 'clean', exit_code: 143,
+        exit_signal: 15, stopped_by: 'panel-shutdown',
+      }),
+    );
+    expect(d.text).toContain('面板关停');
+  });
+
+  // 服务自己 code 0 退出是另一回事：那就是"正常退出"，code 要留着。
+  it('自己正常退出仍显示 code', () => {
+    const d = describeService(
+      row({ state: 'stopped', pid: 0, exit_reason: 'clean', exit_code: 0, stopped_by: 'self' }),
+    );
+    expect(d.text).toContain('正常退出');
+    expect(d.text).toContain('code 0');
+  });
+
   it('从没退出过不能显示成"正常退出 code 0"', () => {
     const d = describeService(row({ state: 'stopped', pid: 0 }));
     expect(d.tone).toBe('idle');

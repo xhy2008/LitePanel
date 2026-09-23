@@ -62,6 +62,13 @@ export function describeService(r: ServiceRow, now = Date.now()): ServiceDesc {
   }
   const at = whenLabel(r.exit_at ?? 0, now);
   const tail = at ? ` · ${at}` : '';
+  // 面板自己停的（含面板重启时的连带关停）：退出码固定是 143，即我们
+  // 自己发的 SIGTERM。按 D21 归 clean 正确，但把 143 直接摆出来会被
+  // 读成故障。归因说清楚，仍然只占 clean/error 两态。
+  if (r.exit_reason === 'clean' && (r.stopped_by === 'user' || r.stopped_by === 'panel-shutdown')) {
+    const why = r.stopped_by === 'user' ? '已停止' : '已停止 · 面板关停';
+    return { tone: 'good', badge, icon: 'check', text: `${why}${tail}` };
+  }
   if (r.exit_reason === 'clean') {
     return { tone: 'good', badge, icon: 'check', text: `正常退出 · code ${r.exit_code ?? 0}${tail}` };
   }
