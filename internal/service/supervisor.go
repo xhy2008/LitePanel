@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -37,7 +36,6 @@ type proc struct {
 	pgid int
 	buf  *LogBuf
 	src  StopSource // 谁发起的停止；watcher 落库时读
-	copy sync.WaitGroup
 	done chan struct{}
 }
 
@@ -157,6 +155,9 @@ func (s *Supervisor) Log(id int64) *LogBuf {
 // Setsid 让子进程自成会话与进程组：既能整组关停，也让 Pdeathsig 在
 // 面板被 kill -9 时由内核收走它（D11）。
 func (s *Supervisor) Start(svc Service) (State, error) {
+	if svc.Kind == KindSystemd {
+		return s.startSystemd(svc)
+	}
 	if svc.Kind != KindCommand {
 		return State{}, fmt.Errorf("%s 类型不由面板托管启动", svc.Kind)
 	}
@@ -166,14 +167,15 @@ func (s *Supervisor) Start(svc Service) (State, error) {
 	cmd.Dir = svc.Cwd
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return State{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return State{}, err
-	}
+	// 直接交 LogBuf，不用 StdoutPipe：StdoutPipe 配 cmd.Wait 有竞态 ——
+	// Wait 会在拷贝协程读完之前关掉读端，正在进行的 io.Copy 被以
+	// "file already closed" 打断，最后几行日志偶发全丢（实测 1/50 复现）。
+	// Stdout 不是 *os.File 时 exec 自建管道并起拷贝协程，且 Wait 会等
+	// 拷贝结束才返回：Wait 返回 == 输出已全部进缓冲。
+	// （不用"先等拷贝再 Wait"的方案：setsid 的子孙进程持有写端时 EOF
+	// 永不到来，那样会死锁。）
+	cmd.Stdout = buf
+	cmd.Stderr = buf
 
 	p := &proc{cmd: cmd, buf: buf, done: make(chan struct{})}
 	buf.OnAppend(func(lines []string) { s.logSink(svc.ID, lines) })
@@ -194,9 +196,6 @@ func (s *Supervisor) Start(svc Service) (State, error) {
 	// Setsid 之后子进程自己就是组长：pgid == pid。
 	p.pgid = cmd.Process.Pid
 
-	p.copy.Add(2)
-	go func() { defer p.copy.Done(); _, _ = io.Copy(buf, stdout) }()
-	go func() { defer p.copy.Done(); _, _ = io.Copy(buf, stderr) }()
 	go s.watch(svc.ID, p)
 
 	st := State{
@@ -218,9 +217,6 @@ func (s *Supervisor) watch(id int64, p *proc) {
 
 	// 非零退出不是 error，是数据；真正的启动失败在 Start 里已经报过了。
 	_ = p.cmd.Wait()
-	// Wait 会在管道拷贝完成前返回；不等一下就会丢掉最后几行日志。
-	p.copy.Wait()
-
 	var ws syscall.WaitStatus
 	if p.cmd.ProcessState != nil {
 		if got, ok := p.cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
@@ -243,6 +239,9 @@ func (s *Supervisor) watch(id int64, p *proc) {
 
 // Stop 停服务：自定义停止命令 → SIGTERM 整组 → 宽限期 → SIGKILL 整组。
 func (s *Supervisor) Stop(ctx context.Context, svc Service, grace time.Duration) (State, error) {
+	if svc.Kind == KindSystemd {
+		return s.stopSystemd(svc)
+	}
 	s.mu.Lock()
 	p, ok := s.procs[svc.ID]
 	if ok {

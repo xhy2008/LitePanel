@@ -623,3 +623,21 @@ func TestEventJSONIsSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// StdoutPipe + cmd.Wait 的竞态回归：Wait 会在拷贝协程读完之前关掉管道
+// 读端，最后几行日志偶发全丢（实测旧实现约 1/50 复现，本机负载下更早）。
+// 日志的价值恰恰在崩溃那一刻，丢的就是最需要看的几行。
+// 循环次数足够多才稳定命中旧 bug；命令保持极短，整组 ~2s。
+func TestLogTailSurvivesWaitRace(t *testing.T) {
+	for i := 0; i < 60; i++ {
+		s, db := newSup(t)
+		svc := addSvc(t, db, "echo 1; echo 2; echo 3; exit 0")
+		if _, err := s.Start(svc); err != nil {
+			t.Fatalf("第 %d 轮 Start: %v", i, err)
+		}
+		waitExit(t, db, svc.ID)
+		if got := s.Log(svc.ID).Len(); got != 3 {
+			t.Fatalf("第 %d 轮: 退出后缓冲应有全部 3 行, got %d", i, got)
+		}
+	}
+}
