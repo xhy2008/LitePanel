@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -587,4 +588,38 @@ func waitForLines(t *testing.T, b *LogBuf, n int, d time.Duration) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("等待 %d 行日志超时, 当前 %d", n, b.Len())
+}
+
+// WS 帧的 key 必须是 snake_case：前端坚持 HTTP 与 WS 共用一套字段名，
+// 缺 tag 就会吐 PascalCase，而前端读不到时只是不更新，不报错 ——
+// 表现为"服务崩了 UI 仍显示运行中"。
+func TestEventJSONIsSnakeCase(t *testing.T) {
+	sig := 9
+	code := 137
+	raw, err := json.Marshal(Event{
+		ID: 7, State: StateStopped,
+		Exit: &ExitInfo{Code: code, Signal: sig, Reason: ReasonError,
+			At: 1700000000, StoppedBy: StoppedByPdeathsig},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"id", "state", "pid", "exit"} {
+		if _, ok := m[k]; !ok {
+			t.Fatalf("缺字段 %q: %s", k, raw)
+		}
+	}
+	exit, ok := m["exit"].(map[string]any)
+	if !ok {
+		t.Fatalf("exit 没序列化出来: %s", raw)
+	}
+	for _, k := range []string{"code", "signal", "reason", "at", "stopped_by"} {
+		if _, ok := exit[k]; !ok {
+			t.Fatalf("exit 缺字段 %q: %s", k, raw)
+		}
+	}
 }

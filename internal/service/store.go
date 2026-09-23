@@ -104,12 +104,15 @@ func (in ServiceInput) valid() error {
 // ExitInfo 是一次退出的记录；nil 表示这个服务从没退出过。
 // 用指针而不是 exit_code IS NULL 的散字段：否则合法的 code 0
 // 会被读成"空"，UI 上就分不清「正常退出 code 0」和「从没跑过」。
+//
+// tag 是必须的：这个类型也会被 WS 帧直接序列化，缺 tag 就吐 PascalCase，
+// 而前端坚持与 HTTP 用同一套 snake_case key。
 type ExitInfo struct {
-	Code      int
-	Signal    int
-	Reason    Reason
-	At        int64
-	StoppedBy string
+	Code      int    `json:"code"`
+	Signal    int    `json:"signal"`
+	Reason    Reason `json:"reason"`
+	At        int64  `json:"at"`
+	StoppedBy string `json:"stopped_by"`
 }
 
 // State 是 service_state 表一行。

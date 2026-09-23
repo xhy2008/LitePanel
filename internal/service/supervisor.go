@@ -47,8 +47,9 @@ type Event struct {
 	ID    int64  `json:"id"`
 	State string `json:"state"`
 	PID   int    `json:"pid"`
-	// 退出信息：nil 表示这次事件不是退出。
-	Exit *ExitInfo `json:"-"`
+	// 退出信息：nil 表示这次事件不是退出。前端靠它就地显示
+	// "异常退出 · code 137"，漏了这个字段 UI 就只能显示干巴巴的"已停止"。
+	Exit *ExitInfo `json:"exit,omitempty"`
 }
 
 // Supervisor 负责 command 类型服务的启停与状态落库。
