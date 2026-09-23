@@ -223,6 +223,19 @@ export function ws(): WsClient {
   return singleton;
 }
 
+/**
+ * 拿浏览器默认实例；环境里没有 WebSocket（SSR、测试）或创建失败时返回 null。
+ * WS 是增强项：拿不到时面板必须照常可用（HTTP 拉列表、手动刷新日志），
+ * 而不是整块视图跟着抛异常白屏。
+ */
+export function tryWs(): WsClient | null {
+  try {
+    return ws();
+  } catch {
+    return null;
+  }
+}
+
 export function closeWs() {
   singleton?.close();
   singleton = null;
