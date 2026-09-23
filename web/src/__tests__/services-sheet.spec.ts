@@ -85,6 +85,22 @@ describe('LogSheet', () => {
     await w.find('.shx').trigger('click');
     expect(w.emitted('close')).toBeTruthy();
   });
+
+  // 计划要求 PC 居中弹窗、手机底部上滑 sheet。只做一种的话，
+  // 电脑上会拖着一条从屏幕底边伸上来的巨型抽屉，鼠标够不着顶部。
+  it('centered 时换成居中弹窗形态', async () => {
+    setApi(fakeApi() as never, location);
+    const w = mount(LogSheet, { props: { id: 1, name: 'x', centered: true } });
+    await flushPromises();
+    expect(w.find('.sh').classes()).toContain('centered');
+  });
+
+  it('默认仍是底部抽屉', async () => {
+    setApi(fakeApi() as never, location);
+    const w = mount(LogSheet, { props: { id: 1, name: 'x' } });
+    await flushPromises();
+    expect(w.find('.sh').classes()).not.toContain('centered');
+  });
 });
 
 describe('ServiceForm', () => {
@@ -172,6 +188,14 @@ describe('ServiceForm', () => {
     await w.find('select[name="kind"]').setValue('systemd');
     expect(w.find('input[name="unit"]').exists()).toBe(true);
     expect(w.find('.inp[name="start_cmd"]').exists()).toBe(false);
+  });
+
+  it('centered 透传到壳上（PC 编辑也该是居中弹窗）', async () => {
+    setApi(fakeApi() as never, location);
+    const w = mount(ServiceForm, {
+      props: { initial: { name: '', kind: 'command', unit: '', start_cmd: '', stop_cmd: '', cwd: '', autostart: false, sort: 0 }, centered: true },
+    });
+    expect(w.find('.sh').classes()).toContain('centered');
   });
 
   it('取消发 close', async () => {

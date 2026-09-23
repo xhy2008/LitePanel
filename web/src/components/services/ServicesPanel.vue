@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import ServiceTile from './ServiceTile.vue';
 import LogSheet from './LogSheet.vue';
 import ServiceForm from './ServiceForm.vue';
 import AppIcon from '../AppIcon.vue';
 import { useServicesStore } from '../../stores/services';
 import { attachServiceStream } from '../../composables/useServiceStream';
+import { useBreakpoint } from '../../composables/useBreakpoint';
 import { tryWs } from '../../api/ws';
 import type { WsClient } from '../../api/ws';
 
@@ -14,6 +15,10 @@ import type { WsClient } from '../../api/ws';
 const props = defineProps<{ wsClient?: WsClient }>();
 
 const store = useServicesStore();
+const { bp } = useBreakpoint();
+// 手机端日志从底部上滑（拇指够得到），平板和 PC 居中 —— 电脑上拖着一条
+// 从屏幕底边伸上来的巨型抽屉，顶部按钮鼠标够不着。
+const centered = computed(() => bp.value !== 'phone');
 const formFor = ref<number | 'new' | null>(null);
 const logFor = ref<{ id: number; name: string } | null>(null);
 
@@ -114,6 +119,7 @@ function openLog(id: number) {
       v-if="formFor !== null"
       class="svc-form"
       :editing="editingRow()"
+      :centered="centered"
       @saved="onSaved"
       @close="formFor = null"
       @deleted="onDeleted"
@@ -123,6 +129,7 @@ function openLog(id: number) {
       v-if="logFor"
       :id="logFor.id"
       :name="logFor.name"
+      :centered="centered"
       :ref="setSheet"
       @close="logFor = null"
     />

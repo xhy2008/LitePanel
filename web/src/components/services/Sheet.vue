@@ -3,7 +3,13 @@ import AppIcon from '../AppIcon.vue';
 
 // 底部弹出面板外壳（对齐原型 .sm/.sh/.shh/.shb/.shf）。
 // 抽出来是为了日志抽屉和新增/编辑表单共用同一套进出场与遮罩行为。
-withDefaults(defineProps<{ title: string; icon?: string }>(), { icon: 'info' });
+// centered：PC 上居中弹窗；手机端（默认）是底部上滑 sheet。
+// 只做一种的话，电脑上会拖着一条从屏幕底边伸上来的巨型抽屉，
+// 顶部按钮鼠标根本够不着。
+const props = withDefaults(
+  defineProps<{ title: string; icon?: string; centered?: boolean }>(),
+  { icon: 'info', centered: false },
+);
 const emit = defineEmits<{ close: [] }>();
 </script>
 
@@ -13,7 +19,7 @@ const emit = defineEmits<{ close: [] }>();
        position:fixed，用 display:contents 包一层不影响布局。 -->
   <div class="sheet">
   <div class="sm" @click="emit('close')" />
-  <div class="sh" role="dialog" :aria-label="title">
+  <div class="sh" :class="{ centered: props.centered }" role="dialog" :aria-label="title">
     <div class="shh">
       <div class="sht"><AppIcon :name="icon" :size="17" />{{ title }}</div>
       <div class="shx" role="button" aria-label="关闭" @click="emit('close')">
@@ -52,6 +58,17 @@ const emit = defineEmits<{ close: [] }>();
   max-height: 86%;
   display: flex;
   flex-direction: column;
+}
+.sh.centered {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  right: auto;
+  width: min(680px, 92vw);
+  max-height: 82vh;
+  transform: translate(-50%, -50%);
+  border-radius: 16px;
+  animation: none;
 }
 .shh {
   padding: 14px 16px;

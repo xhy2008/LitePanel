@@ -10,6 +10,7 @@ import type { ServiceInput, ServiceRow, ServiceKind } from '../../api/services';
 const props = defineProps<{
   editing?: ServiceRow;
   initial?: ServiceInput;
+  centered?: boolean;
 }>();
 const emit = defineEmits<{ saved: []; close: []; deleted: [] }>();
 
@@ -105,7 +106,7 @@ async function submit() {
 </script>
 
 <template>
-  <Sheet :title="editing ? '编辑服务' : '添加服务'" icon="add" @close="emit('close')">
+  <Sheet :title="editing ? '编辑服务' : '添加服务'" icon="add" :centered="centered" @close="emit('close')">
     <form @submit.prevent="submit">
       <div class="fg">
         <label class="fl" for="svc-name">名称 <em class="req">*</em></label>

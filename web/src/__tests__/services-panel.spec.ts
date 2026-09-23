@@ -204,6 +204,17 @@ describe('ServicesPanel', () => {
     expect(w.find('.logbox').exists()).toBe(false);
   });
 
+  // 计划要求 PC 居中弹窗、手机底部上滑。jsdom 的 innerWidth 是 1024
+  // （tablet 档），所以这里断的是"非手机才居中"这条规则本身。
+  it('非手机端日志用居中弹窗', async () => {
+    setApi(fakeApi([row({ id: 5 })]) as never, location);
+    const w = mount(ServicesPanel, { props: { wsClient: fakeWs() as never } });
+    await flushPromises();
+    await w.find('.ib').trigger('click');
+    await flushPromises();
+    expect(w.find('.sh').classes()).toContain('centered');
+  });
+
   // 后端明确写着：CMD 类型随面板存活，面板重启会一并停掉。
   it('提示 CMD 服务随面板存活', async () => {
     setApi(fakeApi([row()]) as never, location);

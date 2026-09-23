@@ -7,8 +7,8 @@ import { getApi } from '../../api/inject';
 // 服务输出抽屉。数据只在后端内存环形缓冲里（D19），这里同样只做
 // 有界缓存 —— 两边都不是历史。
 const props = withDefaults(
-  defineProps<{ id: number; name: string; limit?: number }>(),
-  { limit: 500 },
+  defineProps<{ id: number; name: string; limit?: number; centered?: boolean }>(),
+  { limit: 500, centered: false },
 );
 const emit = defineEmits<{ close: [] }>();
 
@@ -53,7 +53,7 @@ defineExpose({ append });
 </script>
 
 <template>
-  <Sheet :title="`输出 · ${name}`" icon="receipt" @close="emit('close')">
+  <Sheet :title="`输出 · ${name}`" icon="receipt" :centered="centered" @close="emit('close')">
     <div class="lmeta">
       <span class="chip"><AppIcon name="memory" :size="11" /> 内存缓存 · 不持久化</span>
       <span class="chip">最近 {{ bufferLimit }} 行</span>
