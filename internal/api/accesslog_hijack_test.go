@@ -15,12 +15,51 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
+// syncWriter 把"日志写完了"变成可等待的事件。
+// 被 Hijack 的连接不在 srv.Close() 的等待范围内（http.Server 已经不再
+// 跟踪它），所以读日志的测试 goroutine 和写日志的 handler goroutine 在
+// 赛跑 —— 这台单核板上抢输过一次。测试里不能靠时序赌它绿。
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	// done 是带缓冲的：写入方不关心有没有人在听。
+	done chan struct{}
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	w.mu.Unlock()
+	select {
+	case w.done <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// waitLine 等至少一次写入落定；超时不算失败（调用方自己断言内容），
+// 只是别在死等上耗光测试时间。
+func (w *syncWriter) waitLine(d time.Duration) {
+	select {
+	case <-w.done:
+	case <-time.After(d):
+	}
+}
+
 func TestAccessLogPassesHijackThrough(t *testing.T) {
-	var log bytes.Buffer
-	h := accessLog(&log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	log := &syncWriter{done: make(chan struct{}, 16)}
+	h := accessLog(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			// 这就是 M1 事故现场：gorilla 在这里断言失败后回了 500。
@@ -52,6 +91,8 @@ func TestAccessLogPassesHijackThrough(t *testing.T) {
 	// -tags debug 下就输了 —— 典型的假绿/假红对。srv.Close 会等整条
 	// ServeHTTP 链（含中间件收尾）返回。
 	srv.Close()
+	// Hijack 过的连接 srv.Close 管不到，这里再等一次写入落定。
+	log.waitLine(2 * time.Second)
 
 	out := log.String()
 	// 被接管的连接不得记"← … 200"完成行（看着像正常结束，实际连接还活着）。
