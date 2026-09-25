@@ -41,6 +41,11 @@ type AuthDeps struct {
 	// Metrics 为 nil 时指标接口返回 501（不返回空 200 ————
 	// 空壳会被前端渲染成"各项 0%"，看起来像机器空闲）。
 	Metrics MetricsSource
+
+	// Term 为 nil 时终端相关接口返回 501。同上一条的理由：返回
+	// available:false 会把装配层"没接终端模块"渲染成"你的服务器没装
+	// tmux"，把用户支到完全错误的方向去。
+	Term TermProber
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -85,6 +90,9 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Post("/services/{id}/toggle", authed(handleServiceToggle(deps)))
 			a.Get("/services/{id}/log", authed(handleServiceLog(deps)))
 			a.Delete("/services/{id}/log", authed(handleServiceLogClear(deps)))
+		}
+		if deps.Term != nil {
+			a.Get("/term/health", authed(handleTermHealth(deps.Term)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

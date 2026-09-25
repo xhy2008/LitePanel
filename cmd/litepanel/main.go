@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"litepanel/internal/metrics"
 	"litepanel/internal/service"
 	"litepanel/internal/store"
+	"litepanel/internal/terminal"
 	"litepanel/internal/webdist"
 	"litepanel/internal/ws"
 )
@@ -145,6 +147,38 @@ func wireServices(db *store.DB, hub *ws.Hub) *service.Supervisor {
 	return sup
 }
 
+// terminalHealth 是进程级缓存的 tmux 探测结果。
+//
+// 只探一次的理由：tmux 不会在面板运行期间自己装上或换版本，而
+// /api/term/health 会被终端页反复拉取。这个值没有失效路径，所以不需要
+// TTL、不需要锁、不需要刷新入口 —— sync.Once 就是它该有的全部复杂度。
+type terminalHealth struct {
+	once sync.Once
+	h    terminal.Health
+	// probe 是把真实 exec 隔开的缝，存在的唯一理由是让"到底探了几次"
+	// 可测：不比较次数的缓存断言是假断言（版本本身就不变）。
+	// 生产路径不赋它，默认就是 terminal.Probe。
+	probe func() terminal.Health
+}
+
+func (t *terminalHealth) Health() terminal.Health {
+	t.once.Do(func() {
+		probe := t.probe
+		if probe == nil {
+			probe = func() terminal.Health { return terminal.Probe(terminal.DefaultBin) }
+		}
+		t.h = probe()
+	})
+	return t.h
+}
+
+// wireTerminal 建 tmux 健康探测器（GET /api/term/health 的依赖）。
+//
+// 与 wireMetrics/wireServices 同理单独成函数，是为了让"到底接没接"可测：
+// 漏接的表现是终端页永远 501，用户以为面板没做终端功能，而 terminal 与 api
+// 两边各自的测试仍然全绿。
+func wireTerminal() *terminalHealth { return &terminalHealth{} }
+
 // bootServices 做启动对账与自启动。
 //
 // 对账在前：上次面板被 kill -9 留下的进程（若还活着）必须先收走，
@@ -184,6 +218,11 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		SecureCookie: cfg.TLS.Enabled,
 		Debug:        debug,
 		LogWriter:    logw,
+		// Term 在这里接、而不是在 main 里接：它不需要任何外部入参
+		// （探测器自己知道去 PATH 找 tmux），放进 buildDeps 让"接没接"
+		// 变成装配函数自己的责任，测试也就能只调 buildDeps 来验证。
+		// Metrics / Services 需要 source、interval、db 等入参，仍由 main 接。
+		Term: wireTerminal(),
 	}
 }
 

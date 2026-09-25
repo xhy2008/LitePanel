@@ -560,60 +560,6 @@ func ListSessions(bin, prefix string) ([]string, error) {
 	return names, nil
 }
 
-// Health 报告 tmux 是否可用。设计 7.3：不可用时终端页给安装引导，
-// 绝不静默降级到自研 pty。
-type Health struct {
-	OK      bool
-	Version string
-	Reason  string
-}
-
-// minVersion 是 control mode 可靠的版本下限。
-var minVersion = [2]int{2, 1}
-
-// HealthOf 检查 tmux 可用性。
-func HealthOf(bin string) Health {
-	out, err := exec.Command(bin, "-V").CombinedOutput()
-	if err != nil {
-		return Health{Reason: fmt.Sprintf("找不到 tmux（%v）：请 `apt install tmux`", err)}
-	}
-	v := strings.TrimSpace(string(out)) // "tmux 3.7c"
-	major, minor, ok := parseVersion(v)
-	if !ok {
-		return Health{Reason: fmt.Sprintf("读不懂 tmux 版本号 %q", v)}
-	}
-	if major < minVersion[0] || (major == minVersion[0] && minor < minVersion[1]) {
-		return Health{Version: v, Reason: fmt.Sprintf(
-			"tmux 版本过旧（%d.%d < %d.%d），control mode 不可靠，请升级",
-			major, minor, minVersion[0], minVersion[1])}
-	}
-	return Health{OK: true, Version: v}
-}
-
-func parseVersion(s string) (int, int, bool) {
-	i := strings.LastIndexByte(s, ' ')
-	if i < 0 {
-		return 0, 0, false
-	}
-	parts := strings.SplitN(strings.TrimSpace(s[i+1:]), ".", 3)
-	if len(parts) < 2 {
-		return 0, 0, false
-	}
-	a, err1 := strconv.Atoi(parts[0])
-	bStr := parts[1]
-	for j := 0; j < len(bStr); j++ {
-		if bStr[j] < '0' || bStr[j] > '9' {
-			bStr = bStr[:j]
-			break
-		}
-	}
-	b, err2 := strconv.Atoi(bStr)
-	if err1 != nil || err2 != nil {
-		return 0, 0, false
-	}
-	return a, b, true
-}
-
 // quoteAll 把参数拼成一条 control 命令，逐个按需引用。
 func quoteAll(args []string) string {
 	parts := make([]string, len(args))
