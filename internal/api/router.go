@@ -46,6 +46,10 @@ type AuthDeps struct {
 	// available:false 会把装配层"没接终端模块"渲染成"你的服务器没装
 	// tmux"，把用户支到完全错误的方向去。
 	Term TermProber
+
+	// TermSessions 为 nil 时终端会话接口返回 501（同上一条的理由：
+	// 200 + 空列表会被渲染成"服务器上没有任何终端会话"）。
+	TermSessions TermSessions
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -93,6 +97,12 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		}
 		if deps.Term != nil {
 			a.Get("/term/health", authed(handleTermHealth(deps.Term)))
+		}
+		if deps.TermSessions != nil {
+			a.Get("/term/sessions", authed(handleTermSessionsList(deps.TermSessions)))
+			a.Post("/term/sessions", authed(handleTermSessionsCreate(deps.TermSessions)))
+			a.Patch("/term/sessions/{id}", authed(handleTermSessionsRename(deps.TermSessions)))
+			a.Delete("/term/sessions/{id}", authed(handleTermSessionsDelete(deps.TermSessions)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

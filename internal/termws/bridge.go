@@ -32,6 +32,10 @@ import (
 // 超限保尾去头：重连的人最关心"刚才跑到哪了"。
 const MaxReplayBytes = 256 * 1024
 
+// attachTimeout 限制一次接管（fork tmux + 控制模式握手）的耗时。
+// 没有它，tmux server 卡住会让这台设备的读泵永远停在这里。
+const attachTimeout = 15 * time.Second
+
 // Hub 是桥接需要的最小推送能力（真实现是 *ws.Hub）。
 //
 // 订阅者是不透明令牌：桥接只把它当 map key 与"最后按键设备"的记号，
@@ -39,7 +43,7 @@ const MaxReplayBytes = 256 * 1024
 type Hub interface {
 	BroadcastBin(ch string, payload []byte)
 	SendBinTo(sub any, ch string, payload []byte)
-	OnJoin(ch string, fn func(sub any))
+	OnJoin(prefix string, fn func(sub any, ch string))
 	OnBinary(prefix string, fn func(sub any, ch string, payload []byte))
 }
 
@@ -62,6 +66,10 @@ type Manager struct {
 
 	mu   sync.Mutex
 	sess map[string]*entry // term id -> 会话
+	// pending 是"正在被别的连接接管"的会话：两个标签页同时打开同一个
+	// 会话时，只有第一个真去 attach，第二个等它（否则各开一条 control
+	// 连接，同一份输出会被读两遍）。
+	pending map[string]*attempt
 
 	// 会话工厂：测试不需要它们（集成测试直接跑真 tmux），装配层可替换。
 	userFn func(id string, o terminal.SessionOpts) (Session, error)
@@ -82,6 +90,12 @@ type entry struct {
 	owner     any // 这个尺寸是谁定的（nil = 还没人按过键）
 }
 
+// attempt 是一次进行中的接管，供并发等待者取结果。
+type attempt struct {
+	done chan struct{}
+	err  error
+}
+
 type dim struct{ cols, rows int }
 
 func (d dim) valid() bool { return d.cols > 0 && d.rows > 0 }
@@ -89,16 +103,19 @@ func (d dim) valid() bool { return d.cols > 0 && d.rows > 0 }
 // NewManager 建管理器并注册上行路由。
 func NewManager(hub Hub, bin string) *Manager {
 	m := &Manager{
-		hub:    hub,
-		bin:    bin,
-		prefix: "lp-",
-		sess:   map[string]*entry{},
+		hub:     hub,
+		bin:     bin,
+		prefix:  "lp-",
+		sess:    map[string]*entry{},
+		pending: map[string]*attempt{},
 	}
 	m.userFn = m.defaultCreate
 	m.attFn = m.defaultAttach
 	m.listFn = m.defaultList
-	// 上行只注册一次：所有 term:{id} 的按键都进这里，再按频道名分派到会话。
+	// 上行与回放钩子都只注册一次、都按前缀：终端会话是运行期出现的，
+	// 而 hub 的接线必须在开始服务前做完。
 	hub.OnBinary("term:", m.onBinary)
+	hub.OnJoin("term:", m.onJoin)
 	return m
 }
 
@@ -124,7 +141,52 @@ func (m *Manager) openNew(id string, o terminal.SessionOpts) (Session, error) {
 	return m.userFn(id, o)
 }
 
-// adopt 接管一个已打开的会话：登记、注册回放、起扇出泵。
+// Ensure 接管一个面板还没接管的会话（浏览器点开、或启动对账之后 tmux 里
+// 新出现的）。
+//
+// 为什么需要它：面板只在启动时对账一次，而用户完全可能在 tmux 里自己
+// `new-session -s lp-42`。没有按需接管，表现是"侧栏列出了这个会话，点进去
+// 一片空白、敲键没反应"，而且不报任何错。
+//
+// 并发去重是必须的：同一会话开两个标签页是常态，各 attach 一条 control
+// 连接不会报错，只会让同一份输出成倍重复。
+func (m *Manager) Ensure(ctx context.Context, id string) error {
+	m.mu.Lock()
+	if _, ok := m.sess[id]; ok {
+		m.mu.Unlock()
+		return nil
+	}
+	if a, ok := m.pending[id]; ok {
+		m.mu.Unlock()
+		select {
+		case <-a.done:
+			return a.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	a := &attempt{done: make(chan struct{})}
+	m.pending[id] = a
+	m.mu.Unlock()
+
+	a.err = m.attachNow(ctx, id)
+
+	m.mu.Lock()
+	delete(m.pending, id)
+	m.mu.Unlock()
+	close(a.done)
+	return a.err
+}
+
+func (m *Manager) attachNow(ctx context.Context, id string) error {
+	sess, err := m.attFn(id)
+	if err != nil {
+		return err
+	}
+	return m.adopt(id, sess)
+}
+
+// adopt 接管一个已打开的会话：登记并起扇出泵。
 func (m *Manager) adopt(id string, sess Session) error {
 	e := &entry{sess: sess, size: map[any]dim{}}
 	m.mu.Lock()
@@ -136,8 +198,6 @@ func (m *Manager) adopt(id string, sess Session) error {
 	m.sess[id] = e
 	m.mu.Unlock()
 
-	// 回放钩子：新设备接入只补它一份（广播会把正在看的设备整屏重播）
-	m.hub.OnJoin(Channel(id), func(sub any) { m.ReplayFor(id, sub) })
 	go m.pump(id, e)
 	return nil
 }
@@ -265,6 +325,30 @@ func (m *Manager) Close() {
 }
 
 // onBinary 处理上行按键与尺寸上报。
+// onJoin：设备订阅某个会话时，先确保面板接管了它，再给它补一份历史。
+//
+// 接管必须在回放之前：会话可能刚由 REST 建好（或对账之后用户在 tmux 里
+// 自己新建），还没人读它的输出；没接管就回放，能回放的只有空缓冲，
+// 表现是"点进去一片空白、敲键盘没反应"且全程无错误。
+//
+// 回放只补这一份：广播会把正在看的设备整屏重播一遍。
+//
+// 同步执行是刻意的：hub 在客户端自己的读泵里调它，阻塞的只是这台设备，
+// 换来的是"回放一定发生在接管之后、且发生在任何后续按键之前"。
+// 异步化会引入"按键先于回放到达"的乱序，那比多等一秒糟得多。
+func (m *Manager) onJoin(sub any, ch string) {
+	id, ok := strings.CutPrefix(ch, "term:")
+	if !ok || id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), attachTimeout)
+	defer cancel()
+	if err := m.Ensure(ctx, id); err != nil {
+		return // 会话不存在/接不上：不回放进一个不存在的会话
+	}
+	m.ReplayFor(id, sub)
+}
+
 func (m *Manager) onBinary(sub any, ch string, payload []byte) {
 	id := strings.TrimPrefix(ch, "term:")
 	in, err := ParseInbound(payload)

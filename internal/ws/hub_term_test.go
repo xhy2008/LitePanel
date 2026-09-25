@@ -22,7 +22,7 @@ func TestJoinCallbackFiresPerNewSubscriber(t *testing.T) {
 
 	var mu sync.Mutex
 	var joined []*Client
-	f.hub.OnJoin("term:1", func(c *Client) {
+	f.hub.OnJoin("term:1", func(c *Client, _ string) {
 		mu.Lock()
 		joined = append(joined, c)
 		mu.Unlock()
@@ -85,7 +85,7 @@ func TestSendBinToReachesOnlyTarget(t *testing.T) {
 	// 取 c1 对应的 *Client：join 回调是唯一把 hub 内部 client 交给外部的通道
 	var mu sync.Mutex
 	var target *Client
-	f.hub.OnJoin("term:9", func(c *Client) {
+	f.hub.OnJoin("term:9", func(c *Client, _ string) {
 		mu.Lock()
 		target = c
 		mu.Unlock()
@@ -212,5 +212,53 @@ func TestInboundBinaryUnknownChannelGetsError(t *testing.T) {
 	msg := readJSON(t, c, 2*time.Second)
 	if !strings.Contains(msg, `"err"`) {
 		t.Fatalf("未注册的入站频道应回 err 帧, got %s", msg)
+	}
+}
+
+// OnJoin 也必须按前缀登记（与 OnBinary 同构）。
+//
+// 终端会话是**运行期**创建的：面板启动时不知道将来会有哪些 term:{id}，
+// 而 hub 的接线必须在开始服务前做完（joinCB 不是并发安全的表）。精确名
+// 登记等于"永远不登记"——表现是新开的标签页一片空白，要等下一条命令
+// 才有字，而且不报任何错。
+func TestOnJoinPrefixFiresForAnySessionChannel(t *testing.T) {
+	f := newHubFixture(t, true)
+
+	var mu sync.Mutex
+	var hits []string
+	f.hub.OnJoin("term:", func(*Client, string) {
+		mu.Lock()
+		hits = append(hits, "join")
+		mu.Unlock()
+	})
+	seen := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(hits)
+	}
+
+	// 会话 7 在启动时并不存在，前缀登记必须覆盖它
+	c1 := f.dial()
+	if err := c1.WriteMessage(websocket.TextMessage, subFrame("term:7")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return seen() == 1 })
+
+	// 另一台设备订另一个（同样运行期才出现的）会话
+	c2 := f.dial()
+	if err := c2.WriteMessage(websocket.TextMessage, subFrame("term:8")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return seen() == 2 })
+
+	// 非终端频道不能被卷进来：否则每次订 metrics 都会触发一次终端回放
+	c3 := f.dial()
+	if err := c3.WriteMessage(websocket.TextMessage, subFrame("metrics")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return f.hub.SubscriberCount("metrics") == 1 })
+	time.Sleep(150 * time.Millisecond)
+	if n := seen(); n != 2 {
+		t.Fatalf("metrics 订阅触发了终端 join 回调（共 %d 次）", n)
 	}
 }

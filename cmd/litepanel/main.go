@@ -24,6 +24,7 @@ import (
 	"litepanel/internal/service"
 	"litepanel/internal/store"
 	"litepanel/internal/terminal"
+	"litepanel/internal/termws"
 	"litepanel/internal/webdist"
 	"litepanel/internal/ws"
 )
@@ -79,6 +80,12 @@ func main() {
 	deps.Metrics = col
 	sup := wireServices(db, hub)
 	deps.Services = sup
+	// 终端：会话 CRUD 走 HTTP（deps.TermSessions），按键/输出走 WS（桥接已
+	// 挂在 hub 上）。Bridge 必须在退出时 Close —— 否则面板停止时那些
+	// `tmux -CC attach` 子进程会留着（tmux 会话本身要活下去，这是 D5）。
+	tw := wireTerminal(db, hub)
+	deps.TermSessions = tw.Sessions
+	defer tw.Bridge.Close()
 
 	sub, err := webdist.Dist()
 	if err != nil {
@@ -104,6 +111,8 @@ func main() {
 	if err := bootServices(bootCtx, sup, db); err != nil {
 		logx.Info("启动托管服务: %v", err)
 	}
+	// 终端对账：把库刷成 tmux 的样子，并接管上次面板遗留的会话（D5）。
+	tw.Reconcile(bootCtx)
 	bootCancel()
 
 	stop := make(chan os.Signal, 1)
@@ -172,12 +181,49 @@ func (t *terminalHealth) Health() terminal.Health {
 	return t.h
 }
 
-// wireTerminal 建 tmux 健康探测器（GET /api/term/health 的依赖）。
+// wireTerminalHealth 建 tmux 健康探测器（GET /api/term/health 的依赖）。
 //
 // 与 wireMetrics/wireServices 同理单独成函数，是为了让"到底接没接"可测：
 // 漏接的表现是终端页永远 501，用户以为面板没做终端功能，而 terminal 与 api
 // 两边各自的测试仍然全绿。
-func wireTerminal() *terminalHealth { return &terminalHealth{} }
+func wireTerminalHealth() *terminalHealth { return &terminalHealth{} }
+
+// terminalWiring 是终端模块的三件套：健康探测、会话 CRUD、WS 桥接。
+type terminalWiring struct {
+	Health   *terminalHealth
+	Sessions *terminal.Service
+	Bridge   *termws.Manager
+}
+
+// wireTerminal 装配整个终端模块。
+//
+// 会话 CRUD 走 REST（buildDeps 里赋 deps.TermSessions），按键/输出走 WS
+// （桥接直接挂在 hub 上）—— 两条路互不依赖，所以桥接不进 AuthDeps：
+// 它是 WS 侧的组件，塞进 HTTP 依赖里只会让人以为有个"终端桥接 API"。
+//
+// 顺序有讲究：先建 Manager（它要在开始服务前把 hub 的前缀回调登记好），
+// 会话服务随后（它不碰 hub）。
+func wireTerminal(db *store.DB, hub *ws.Hub) *terminalWiring {
+	return &terminalWiring{
+		Health:   wireTerminalHealth(),
+		Sessions: terminal.NewService(db, terminal.DefaultBin),
+		Bridge:   termws.NewManager(termHub{h: hub}, terminal.DefaultBin),
+	}
+}
+
+// Reconcile 在启动时把库刷成 tmux 的样子，并接管 tmux 里活着的会话。
+//
+// D5 的核心承诺是"面板重启，终端里的任务不死"：只做库的对账而漏掉桥接，
+// 表现是侧栏列出了会话而点进去没反应。两边必须一起对。
+// 单个会话接不上不拖垮启动（terminal/termws 内部已逐个容错）。
+func (tw *terminalWiring) Reconcile(ctx context.Context) {
+	if err := tw.Sessions.Reconcile(ctx); err != nil {
+		logx.Info("终端会话对账: %v", err)
+	}
+	if _, err := tw.Bridge.Reconcile(ctx); err != nil {
+		logx.Info("终端桥接对账: %v", err)
+	}
+}
 
 // bootServices 做启动对账与自启动。
 //
@@ -222,7 +268,7 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// （探测器自己知道去 PATH 找 tmux），放进 buildDeps 让"接没接"
 		// 变成装配函数自己的责任，测试也就能只调 buildDeps 来验证。
 		// Metrics / Services 需要 source、interval、db 等入参，仍由 main 接。
-		Term: wireTerminal(),
+		Term: wireTerminalHealth(),
 	}
 }
 

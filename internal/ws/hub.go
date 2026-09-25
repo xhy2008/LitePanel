@@ -55,7 +55,7 @@ type Hub struct {
 	clients map[*Client]map[string]bool // client -> 订阅的频道集合
 	byCh    map[string]map[*Client]bool // 频道 -> 订阅者
 	countCB map[string]func(int)
-	joinCB  map[string]func(*Client)
+	joinCB  map[string]func(*Client, string)
 	binCB   map[string]func(*Client, string, []byte) // 前缀 -> 入站二进制处理器
 	seq     atomic.Uint64
 
@@ -67,7 +67,7 @@ func NewHub() *Hub {
 		clients: map[*Client]map[string]bool{},
 		byCh:    map[string]map[*Client]bool{},
 		countCB: map[string]func(int){},
-		joinCB:  map[string]func(*Client){},
+		joinCB:  map[string]func(*Client, string){},
 		binCB:   map[string]func(*Client, string, []byte){},
 	}
 }
@@ -83,10 +83,17 @@ func (h *Hub) OnCount(channel string, fn func(int)) {
 // OnJoin 在「某个客户端新增订阅该频道」时回调（重复 sub 不重复触发）。
 // 终端用它做回放：新接入的设备要单独补一份历史，而已经在看的设备不能
 // 被重播一遍。
-func (h *Hub) OnJoin(channel string, fn func(*Client)) {
+//
+// 与 OnBinary 一样按**前缀**登记（取最长匹配）。精确名登记在终端场景下
+// 等于永远不登记：会话是运行期创建的，而接线必须在开始服务前做完。
+// 允许同时登记精确名与前缀，最长者优先 —— 这样别的模块可以为某一个
+// 频道单独接管，不影响其余频道。
+//
+// 回调收到频道名：前缀登记后一个回调对应多个会话，不带频道名就分不了派。
+func (h *Hub) OnJoin(prefix string, fn func(*Client, string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.joinCB[channel] = fn
+	h.joinCB[prefix] = fn
 }
 
 // OnBinary 注册入站二进制路由，按频道名前缀匹配（终端注册 "term:"）。
@@ -222,14 +229,26 @@ func (h *Hub) subscribe(c *Client, ch string) {
 	h.byCh[ch][c] = true
 	n := len(h.byCh[ch])
 	cb := h.countCB[ch]
-	join := h.joinCB[ch]
+	join := h.matchJoinLocked(ch)
 	h.mu.Unlock()
 	if cb != nil {
 		cb(n)
 	}
 	if join != nil {
-		join(c)
+		join(c, ch)
 	}
+}
+
+// matchJoinLocked 取最长前缀匹配的 join 回调。
+func (h *Hub) matchJoinLocked(ch string) func(*Client, string) {
+	var fn func(*Client, string)
+	best := -1
+	for prefix, cb := range h.joinCB {
+		if strings.HasPrefix(ch, prefix) && len(prefix) > best {
+			fn, best = cb, len(prefix)
+		}
+	}
+	return fn
 }
 
 func (h *Hub) unsubscribe(c *Client, ch string) {

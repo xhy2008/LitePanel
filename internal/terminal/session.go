@@ -535,6 +535,23 @@ func KillSession(bin, name string) error {
 	return nil
 }
 
+// HasSession 判断 tmux 里是否存在该会话（精确名）。
+//
+// 必须用 "=名字"：tmux 的 -t 默认是**前缀匹配**，lp-1 会命中 lp-10
+// （实测过会话共存的场景）。删错会话比删不掉严重得多。
+// server 整个没起时回 (false, nil)：那是"会话不存在"，不是查询失败。
+func HasSession(bin, name string) (bool, error) {
+	out, err := exec.Command(bin, "has-session", "-t", "="+name).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if strings.Contains(msg, "no server running") || strings.Contains(msg, "can't find session") {
+		return false, nil
+	}
+	return false, fmt.Errorf("has-session %s: %v (%s)", name, err, msg)
+}
+
 // ListSessions 列出带指定前缀的会话名，供面板启动对账。
 //
 // 走 CLI 而不是 control 的 list-sessions：控制连接分不到命令编号，把列表

@@ -24,7 +24,7 @@ type fakeHub struct {
 	mu        sync.Mutex
 	bins      []binMsg // BroadcastBin 历史
 	singles   []binMsg // SendBinTo 历史
-	joinCB    map[string]func(any)
+	joinCB    map[string]func(any, string)
 	binCB     map[string]func(any, string, []byte)
 	joinToken any // triggerJoin 用的令牌
 }
@@ -36,7 +36,7 @@ type binMsg struct {
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{joinCB: map[string]func(any){}, binCB: map[string]func(any, string, []byte){}}
+	return &fakeHub{joinCB: map[string]func(any, string){}, binCB: map[string]func(any, string, []byte){}}
 }
 
 func (f *fakeHub) BroadcastBin(ch string, payload []byte) {
@@ -51,9 +51,9 @@ func (f *fakeHub) SendBinTo(sub any, ch string, payload []byte) {
 	f.mu.Unlock()
 }
 
-func (f *fakeHub) OnJoin(ch string, fn func(any)) {
+func (f *fakeHub) OnJoin(prefix string, fn func(any, string)) {
 	f.mu.Lock()
-	f.joinCB[ch] = fn
+	f.joinCB[prefix] = fn
 	f.mu.Unlock()
 }
 
@@ -64,12 +64,20 @@ func (f *fakeHub) OnBinary(prefix string, fn func(any, string, []byte)) {
 }
 
 // 测试驱动用的入口（真实现里由 hub 的读泵触发）
+// triggerJoin 与真 hub 一样做最长前缀匹配：桥接现在按 "term:" 前缀登记
+// 一次，替身若按精确名查表就永远查不到，回放相关的测试会假绿。
 func (f *fakeHub) triggerJoin(ch string, sub any) {
 	f.mu.Lock()
-	fn := f.joinCB[ch]
+	var fn func(any, string)
+	best := -1
+	for p, cb := range f.joinCB {
+		if strings.HasPrefix(ch, p) && len(p) > best {
+			fn, best = cb, len(p)
+		}
+	}
 	f.mu.Unlock()
 	if fn != nil {
-		fn(sub)
+		fn(sub, ch)
 	}
 }
 
@@ -413,4 +421,208 @@ func sendKeys(t *testing.T, fh *fakeHub, id string, sub any, text string) {
 		sub = new(any)
 	}
 	fh.triggerBinary(sub, "term:"+id, KeysFrame([]byte(text)))
+}
+
+// 浏览器打开一个面板尚未接管的会话时要按需接管。
+//
+// 触发条件很常见：用户在 tmux 里自己 `new-session -s lp-42`（对账之后建的），
+// 或启动对账时某条 attach 失败被跳过。没有这个能力，表现是"侧栏列出了这个
+// 会话，点进去一片空白、敲键没反应"，而且不报任何错。
+//
+// 键一律经桥接注入（sendKeys），与真实前端同一条路径：桥接的 SendText 会等
+// 控制模式握手就绪。曾经用外部 `tmux send-keys` 注入，结果偶发红 —— 握手
+// 期间 pane 的输出不会以 %output 送达，而控制模式**不回放历史**，那条输出
+// 就永远丢了。那不是产品缺陷（前端本来就靠 capture/缓冲回放补历史），
+// 是测试绕过了就绪语义。
+func TestEnsureAttachesUnmanagedSession(t *testing.T) {
+	m, fh := newManager(t)
+	id := testID()
+	name := "lp-" + id
+	if out, err := exec.Command(terminal.DefaultBin, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
+		t.Fatalf("造会话失败: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = terminal.KillSession(terminal.DefaultBin, name) })
+
+	if got := m.Sessions(); containsID(got, id) {
+		t.Fatalf("前置条件不成立：还没 Ensure 就已接管: %v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := m.Ensure(ctx, id); err != nil {
+		t.Fatalf("按需接管失败: %v", err)
+	}
+
+	// 接管不是"登记一个壳"：注入的键要真的进 pane，输出要真的扇出
+	marker := fmt.Sprintf("ONDEMAND-%d", time.Now().UnixNano())
+	sendKeys(t, fh, id, new(any), "echo "+marker+"\r")
+	waitFor(t, func() bool { return strings.Contains(fh.allBroadcast(), marker) },
+		"接管后的输出扇出")
+}
+
+// 重复 Ensure 不得再开一条 control 连接。
+//
+// 同一会话开两个标签页是常态。各 attach 一条 control 连接不会报错，
+// 只会让同一份输出成倍重复。
+func TestEnsureIsIdempotent(t *testing.T) {
+	m, fh := newManager(t)
+	id := testID()
+	name := "lp-" + id
+	if out, err := exec.Command(terminal.DefaultBin, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
+		t.Fatalf("造会话失败: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = terminal.KillSession(terminal.DefaultBin, name) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		if err := m.Ensure(ctx, id); err != nil {
+			t.Fatalf("第 %d 次 Ensure 失败: %v", i+1, err)
+		}
+	}
+	if got := m.Sessions(); !containsID(got, id) {
+		t.Fatalf("接管后应在管理列表中: %v", got)
+	}
+
+	// 输出不许成倍：一条命令只该扇出一份。这是"只开了一条 control 连接"的
+	// 直接可观测后果，比数 tmux 客户端更贴近用户看到的现象。
+	//
+	// marker 先存进变量再打印：回显键入字符时 "X"+marker+"Y" 不会连在一起
+	// 出现（shell 会把敲进去的命令原样再打一遍，直接 echo marker 必然数到 2，
+	// 那种断言等于没断言）。只有输出行才有连续的 X<marker>Y。
+	marker := fmt.Sprintf("ONCE-%d", time.Now().UnixNano())
+	want := "X" + marker + "Y"
+	sendKeys(t, fh, id, new(any), fmt.Sprintf("M=%s; printf 'X%%sY\\n' \"$M\"\r", marker))
+	waitFor(t, func() bool { return strings.Contains(fh.allBroadcast(), want) }, "输出扇出")
+	time.Sleep(500 * time.Millisecond) // 给"重复帧"一点时间暴露
+	if n := strings.Count(fh.allBroadcast(), want); n != 1 {
+		t.Fatalf("同一条输出扇出了 %d 次（control 连接开重了）", n)
+	}
+	// 独立观测：tmux 自己看到的连接数（"面板说一条"与"真一条"是两件事）
+	if n := countClients(t, name); n != 1 {
+		t.Fatalf("tmux 侧看到 %d 个客户端，应为 1", n)
+	}
+}
+
+// 并发 Ensure 只许开一条 control 连接。
+//
+// 顺序调用的重复 Ensure 走不到去重逻辑（第二次进来 m.sess 已有，直接返回），
+// 所以顺序测试对去重是**假覆盖** —— 实测把 pending 拆掉它照样绿。
+// 真实的竞态是两台设备同时点开同一个会话：两边都发现"还没接管"，
+// 各自 attach 一条。各开一条不报错，只会让同一份输出成倍重复。
+func TestConcurrentEnsureOpensOneControl(t *testing.T) {
+	m, _ := newManager(t)
+	id := testID()
+	name := "lp-" + id
+	if out, err := exec.Command(terminal.DefaultBin, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
+		t.Fatalf("造会话失败: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = terminal.KillSession(terminal.DefaultBin, name) })
+
+	const n = 12
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = m.Ensure(ctx, id)
+		}(i)
+	}
+	close(start) // 同时放行，制造真竞态
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个并发 Ensure 失败: %v", i, err)
+		}
+	}
+	if got := m.Sessions(); countOf(got, id) != 1 {
+		t.Fatalf("接管记录不是恰好一条: %v", got)
+	}
+	// 独立观测 tmux 侧的连接数。不 sleep：attach 子进程注册需要时间，
+	// 但**已经等到 1**就说明没第二条 —— 多开的那条只会更早或同样晚出现，
+	// 而重复扇出会在下面的输出检查里暴露。
+	waitFor(t, func() bool { return countClients(t, name) >= 1 }, "control 连接注册")
+	if n := countClients(t, name); n != 1 {
+		t.Fatalf("tmux 侧看到 %d 条连接，应为 1", n)
+	}
+}
+
+func countOf(xs []string, want string) int {
+	n := 0
+	for _, x := range xs {
+		if x == want {
+			n++
+		}
+	}
+	return n
+}
+
+// Ensure 一个 tmux 里不存在的 id 必须报错，而不是接管出一个空壳。
+// 静默成功会让前端以为接上了，然后永远等不到任何输出。
+func TestEnsureUnknownIDFails(t *testing.T) {
+	m, _ := newManager(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := m.Ensure(ctx, "999999999"); err == nil {
+		t.Fatal("不存在的会话应报错")
+	}
+}
+
+func containsID(xs []string, id string) bool {
+	for _, x := range xs {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// countClients 数 tmux 自己看到的连接数，不靠面板自报：
+// "面板说我只开了一条"与"真只开了一条"是两件事。
+func countClients(t *testing.T, name string) int {
+	t.Helper()
+	out, err := exec.Command(terminal.DefaultBin, "list-clients", "-t", "="+name).Output()
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// 浏览器**订阅**一个尚未接管的会话时就要接管，而不是只回放。
+//
+// 这是 REST 新建会话的正常路径：POST /api/term/sessions 只负责建 tmux 会话
+// 与库里的行（它不该认识桥接），前端拿到结果后立刻订阅 term:{id}。
+// 若 onJoin 只 ReplayFor，而未接管时什么都回放不了，表现就是"会话建好了、
+// 点进去一片空白，敲键盘没反应"，且全程无错误。
+func TestSubscribeTriggersAttach(t *testing.T) {
+	m, fh := newManager(t)
+	id := testID()
+	name := "lp-" + id
+	if out, err := exec.Command(terminal.DefaultBin, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
+		t.Fatalf("造会话失败: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = terminal.KillSession(terminal.DefaultBin, name) })
+
+	// 只订阅，不调 Ensure —— 这就是前端做的事
+	sub := new(any)
+	fh.triggerJoin("term:"+id, sub)
+
+	marker := fmt.Sprintf("SUB-%d", time.Now().UnixNano())
+	sendKeys(t, fh, id, sub, "echo "+marker+"\r")
+	waitFor(t, func() bool { return strings.Contains(fh.allBroadcast(), marker) },
+		"订阅后按键有输出")
+	if got := m.Sessions(); !containsID(got, id) {
+		t.Fatalf("订阅应让会话进入接管列表: %v", got)
+	}
 }
