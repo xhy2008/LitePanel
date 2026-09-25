@@ -7,6 +7,7 @@ package ws
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,8 @@ type Hub struct {
 	clients map[*Client]map[string]bool // client -> 订阅的频道集合
 	byCh    map[string]map[*Client]bool // 频道 -> 订阅者
 	countCB map[string]func(int)
+	joinCB  map[string]func(*Client)
+	binCB   map[string]func(*Client, string, []byte) // 前缀 -> 入站二进制处理器
 	seq     atomic.Uint64
 
 	closed atomic.Bool
@@ -64,6 +67,8 @@ func NewHub() *Hub {
 		clients: map[*Client]map[string]bool{},
 		byCh:    map[string]map[*Client]bool{},
 		countCB: map[string]func(int){},
+		joinCB:  map[string]func(*Client){},
+		binCB:   map[string]func(*Client, string, []byte){},
 	}
 }
 
@@ -73,6 +78,57 @@ func (h *Hub) OnCount(channel string, fn func(int)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.countCB[channel] = fn
+}
+
+// OnJoin 在「某个客户端新增订阅该频道」时回调（重复 sub 不重复触发）。
+// 终端用它做回放：新接入的设备要单独补一份历史，而已经在看的设备不能
+// 被重播一遍。
+func (h *Hub) OnJoin(channel string, fn func(*Client)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.joinCB[channel] = fn
+}
+
+// OnBinary 注册入站二进制路由，按频道名前缀匹配（终端注册 "term:"）。
+// 只有当该客户端确实订阅了这个频道才会投递，否则回 err —— 否则任何已登录
+// 连接都能往它没订阅的会话里灌按键。
+func (h *Hub) OnBinary(prefix string, fn func(*Client, string, []byte)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.binCB[prefix] = fn
+}
+
+// SendBinTo 向单个客户端投递二进制帧，前提是它仍订阅该频道。
+// 订阅校验是必须的：join 回调与回放写入之间客户端可能已经退订/断开，
+// 此时这一帧应该消失，而不是飘给一个不该收它的连接。
+func (h *Hub) SendBinTo(c *Client, channel string, payload []byte) {
+	h.mu.Lock()
+	subscribed := h.clients[c][channel]
+	h.mu.Unlock()
+	if !subscribed {
+		return
+	}
+	c.trySend(outItem{mt: websocket.BinaryMessage, payload: EncodeTermFrame(channel, payload)})
+}
+
+// routeBinary 找到频道对应的入站处理器；第二个返回值 false 表示应回 err。
+func (h *Hub) routeBinary(c *Client, channel string, payload []byte) bool {
+	h.mu.Lock()
+	var fn func(*Client, string, []byte)
+	best := -1
+	for prefix, cb := range h.binCB {
+		if strings.HasPrefix(channel, prefix) && len(prefix) > best {
+			fn, best = cb, len(prefix)
+		}
+	}
+	subscribed := h.clients[c][channel]
+	h.mu.Unlock()
+
+	if fn == nil || !subscribed {
+		return false
+	}
+	fn(c, channel, payload)
+	return true
 }
 
 var upgrader = websocket.Upgrader{
@@ -166,9 +222,13 @@ func (h *Hub) subscribe(c *Client, ch string) {
 	h.byCh[ch][c] = true
 	n := len(h.byCh[ch])
 	cb := h.countCB[ch]
+	join := h.joinCB[ch]
 	h.mu.Unlock()
 	if cb != nil {
 		cb(n)
+	}
+	if join != nil {
+		join(c)
 	}
 }
 
@@ -248,7 +308,10 @@ func (c *Client) readPump() {
 		}
 		_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 		if mt == websocket.BinaryMessage {
-			c.sendErr("", "binary control frames are not accepted")
+			ch, payload, err := DecodeTermFrame(data)
+			if err != nil || !c.hub.routeBinary(c, ch, payload) {
+				c.sendErr(ch, "该频道不接受二进制帧")
+			}
 			continue
 		}
 		var f Frame
