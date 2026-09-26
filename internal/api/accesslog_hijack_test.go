@@ -48,12 +48,22 @@ func (w *syncWriter) String() string {
 	return w.buf.String()
 }
 
-// waitLine 等至少一次写入落定；超时不算失败（调用方自己断言内容），
-// 只是别在死等上耗光测试时间。
-func (w *syncWriter) waitLine(d time.Duration) {
-	select {
-	case <-w.done:
-	case <-time.After(d):
+// waitContains 轮询到日志里出现 want 为止，返回是否等到。
+//
+// 这里不能用"等一次写入落定"：接管场景下第一条写入是 → 请求行，
+// 而 ↔ 是 handler 返回之后才写的 —— 等到第一条就去断言 ↔，测的是
+// 调度而不是行为。这台板上整套测试并发跑时输过一次（单跑 40 次全绿，
+// 全量跑红一次：典型的"本地绿、CI 红"形状）。
+func (w *syncWriter) waitContains(want string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if strings.Contains(w.String(), want) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -91,8 +101,11 @@ func TestAccessLogPassesHijackThrough(t *testing.T) {
 	// -tags debug 下就输了 —— 典型的假绿/假红对。srv.Close 会等整条
 	// ServeHTTP 链（含中间件收尾）返回。
 	srv.Close()
-	// Hijack 过的连接 srv.Close 管不到，这里再等一次写入落定。
-	log.waitLine(2 * time.Second)
+	// Hijack 过的连接 srv.Close 管不到（server 早已不再跟踪它），
+	// 唯一可靠的做法是轮询到那一行真的出现。
+	if !log.waitContains("↔", 2*time.Second) {
+		t.Fatalf("等不到接管行，got %q", log.String())
+	}
 
 	out := log.String()
 	// 被接管的连接不得记"← … 200"完成行（看着像正常结束，实际连接还活着）。
@@ -106,8 +119,10 @@ func TestAccessLogPassesHijackThrough(t *testing.T) {
 
 // 普通（不劫持）响应必须照常记完成行，防止为了过上一个用例把日志整个砍掉。
 func TestAccessLogStillLogsNormalResponse(t *testing.T) {
-	var log bytes.Buffer
-	h := accessLog(&log, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// 用同一个 syncWriter：这条要等的也是 handler 返回之后才写的行，
+	// bytes.Buffer 没有"等到为止"这个能力，只能靠运气读到完整的。
+	log := &syncWriter{done: make(chan struct{}, 16)}
+	h := accessLog(log, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	}))
 	srv := httptest.NewServer(h)
@@ -118,6 +133,12 @@ func TestAccessLogStillLogsNormalResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	// 完成行同样是 handler 返回之后才写的：不等它就断言，读到的是
+	// 半截日志。srv.Close 等整条 ServeHTTP 链收尾，再轮询兜底。
+	srv.Close()
+	if !log.waitContains("←", 2*time.Second) {
+		t.Fatalf("等不到完成行，got %q", log.String())
+	}
 
 	if !strings.Contains(log.String(), "←") || !strings.Contains(log.String(), "201") {
 		t.Errorf("普通响应应记完成行含状态码, got %q", log.String())
