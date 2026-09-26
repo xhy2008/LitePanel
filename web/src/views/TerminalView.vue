@@ -7,6 +7,7 @@ import AppIcon from '../components/AppIcon.vue';
 import Sheet from '../components/services/Sheet.vue';
 import { useTerminalStore, autoTitle } from '../stores/terminal';
 import { useQuickCmdStore, tabBadge } from '../stores/quickcmd';
+import { useBusyWatch } from '../composables/useBusyWatch';
 import { createTerminalRuntime } from '../composables/useTerminal';
 import { useTermRuntimes, type Runtime } from '../composables/useTermRuntimes';
 import { termChannel, HISTORY_LIMITS, DEFAULT_HISTORY_LIMIT } from '../api/terminal';
@@ -47,6 +48,10 @@ const renameTo = ref<{ id: number; title: string } | null>(null);
 
 let client: WsClient | null = null;
 let tick: ReturnType<typeof setInterval> | null = null;
+// 忙闲轮询。"命令结束了"这件事不会推给任何人，不轮询就只能靠用户点标签
+// 去碰 —— 于是快捷命令跑完之后角标永久停在"忙"，下一次点命令就白开一个
+// 会话（实际踩到的就是这个）。
+const busyWatch = useBusyWatch(cmds);
 let offStatus: (() => void) | null = null;
 
 function setPane(id: number, el: unknown) {
@@ -161,9 +166,6 @@ async function pick(id: number) {
   if (id === store.activeId) return;
   store.select(id);
   await syncActive();
-  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
-  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
-  void cmds.refreshBusy();
 }
 
 async function createSession() {
@@ -176,9 +178,6 @@ async function createSession() {
     formOpen.value = false;
     form.value = { title: '', cwd: '', history: DEFAULT_HISTORY_LIMIT };
     await syncActive();
-  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
-  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
-  void cmds.refreshBusy();
   } catch {
     /* 文案在 store.error 里，抽屉保持打开让用户改 */
   }
@@ -206,9 +205,6 @@ async function doDelete() {
   }
   runtimes.remove(id, store.activeId);
   await syncActive();
-  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
-  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
-  void cmds.refreshBusy();
 }
 
 function readTheme() {
@@ -238,15 +234,17 @@ onMounted(async () => {
     });
   }
   await syncActive();
-  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
-  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
-  void cmds.refreshBusy();
+  // 忙闲角标（原型 lp-2 · 忙）：start 立刻查一次，之后按固定节拍续查。
+  // 之前这里是"切标签/建会话时各查一次"散在三处 —— 那只是"没人轮询"
+  // 的补丁，而漏掉的那一处就是角标卡在忙不动。
+  busyWatch.start();
   // 布局变化不一定触发 xterm 的 onResize（侧栏动画、软键盘收起、浏览器
   // 缩放），所以留一个便宜的兜底：只在当前会话上量一次，尺寸没变就什么都不发。
   tick = setInterval(() => runtimes.get(store.activeId)?.checkSize(), 250);
 });
 
 onUnmounted(() => {
+  busyWatch.stop();
   if (tick) clearInterval(tick);
   tick = null;
   offStatus?.();
