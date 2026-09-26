@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { setApi, resetApi } from '../api/inject';
 import QuickCmdView from '../views/QuickCmdView.vue';
+import { makeRouter } from './cmdpanelHarness';
 
 const location = { pathname: '/quick', search: '', assign: () => {} };
 
@@ -58,5 +59,33 @@ describe('QuickCmdView 分段', () => {
     expect(segs[0].classes()).toContain('on');
     await segs[1].trigger('click');
     expect(w.findAll('.segb')[1].classes()).toContain('on');
+  });
+
+  // 快捷命令分段不再是一句"将来落地"的占位：M5 之后它就是真列表。
+  // 占位文案留在页面上是最坏的一种退化 —— 页面看着正常，功能却整块没了。
+  it('切到快捷命令分段后渲染真列表，不是占位文案', async () => {
+    setActivePinia(createPinia());
+    resetApi();
+    setApi(fakeApi() as never, location);
+    const w = mount(QuickCmdView, { global: { plugins: [makeRouter()] } });
+    await flushPromises();
+    await w.findAll('.segb')[1].trigger('click');
+    await flushPromises();
+    expect(w.text()).not.toContain('将在 M5 落地');
+    expect(w.find('.cmds').exists()).toBe(true);
+    expect(w.find('.tile-add').exists()).toBe(true);
+  });
+
+  // v-if 而不是 v-show：切走就该停掉那一侧的列表请求与订阅。
+  it('切回服务管理时分段整块卸载', async () => {
+    setActivePinia(createPinia());
+    resetApi();
+    setApi(fakeApi() as never, location);
+    const w = mount(QuickCmdView, { global: { plugins: [makeRouter()] } });
+    await flushPromises();
+    await w.findAll('.segb')[1].trigger('click');
+    await flushPromises();
+    await w.findAll('.segb')[0].trigger('click');
+    expect(w.find('.cmds').exists()).toBe(false);
   });
 });

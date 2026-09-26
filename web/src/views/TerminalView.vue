@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import AppIcon from '../components/AppIcon.vue';
 import Sheet from '../components/services/Sheet.vue';
 import { useTerminalStore, autoTitle } from '../stores/terminal';
+import { useQuickCmdStore, tabBadge } from '../stores/quickcmd';
 import { createTerminalRuntime } from '../composables/useTerminal';
 import { useTermRuntimes, type Runtime } from '../composables/useTermRuntimes';
 import { termChannel, HISTORY_LIMITS, DEFAULT_HISTORY_LIMIT } from '../api/terminal';
@@ -19,6 +20,10 @@ import { tryWs, type WsClient } from '../api/ws';
 const props = defineProps<{ wsClient?: WsClient }>();
 
 const store = useTerminalStore();
+// 忙闲存在 quickcmd store 上（那里是 /api/commands/busy 的唯一客户端）：
+// 两个页面各打一枪就是双倍往返，而且两份结论会不一致 —— 用户在命令页
+// 看到"空闲"、终端标签上却写着"忙"。
+const cmds = useQuickCmdStore();
 const { bp } = useBreakpoint();
 const isPhone = computed(() => bp.value === 'phone');
 
@@ -156,6 +161,9 @@ async function pick(id: number) {
   if (id === store.activeId) return;
   store.select(id);
   await syncActive();
+  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
+  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
+  void cmds.refreshBusy();
 }
 
 async function createSession() {
@@ -168,6 +176,9 @@ async function createSession() {
     formOpen.value = false;
     form.value = { title: '', cwd: '', history: DEFAULT_HISTORY_LIMIT };
     await syncActive();
+  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
+  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
+  void cmds.refreshBusy();
   } catch {
     /* 文案在 store.error 里，抽屉保持打开让用户改 */
   }
@@ -195,6 +206,9 @@ async function doDelete() {
   }
   runtimes.remove(id, store.activeId);
   await syncActive();
+  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
+  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
+  void cmds.refreshBusy();
 }
 
 function readTheme() {
@@ -224,6 +238,9 @@ onMounted(async () => {
     });
   }
   await syncActive();
+  // 标签上的"忙"角标（原型 lp-2 · 忙）。查不到时 tabBadge 给空串，
+  // 也就是不画 —— 挂个"状态未知"比不挂更像故障。
+  void cmds.refreshBusy();
   // 布局变化不一定触发 xterm 的 onResize（侧栏动画、软键盘收起、浏览器
   // 缩放），所以留一个便宜的兜底：只在当前会话上量一次，尺寸没变就什么都不发。
   tick = setInterval(() => runtimes.get(store.activeId)?.checkSize(), 250);
@@ -261,6 +278,7 @@ onUnmounted(() => {
           >
             <span class="dot" />
             <span class="tname">{{ s.title }}</span>
+            <span v-if="tabBadge(cmds.busy[s.id])" class="tbusy">{{ tabBadge(cmds.busy[s.id]) }}</span>
             <span
               v-if="s.id === store.activeId"
               class="x"
@@ -430,6 +448,11 @@ onUnmounted(() => {
   height: 6px;
   border-radius: 50%;
   background: var(--ok);
+}
+.tbusy {
+  font-size: 10px;
+  color: var(--warn);
+  flex: none;
 }
 .tname {
   max-width: 12em;

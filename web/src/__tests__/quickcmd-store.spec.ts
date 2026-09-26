@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { setApi, resetApi } from '../api/inject';
-import { useQuickCmdStore, describeRun } from '../stores/quickcmd';
+import { useQuickCmdStore, describeRun, tabBadge } from '../stores/quickcmd';
 import { useTerminalStore } from '../stores/terminal';
 import type { TermSessionRow } from '../api/terminal';
 import type { BusyEntry, CommandRow } from '../api/quickcmd';
@@ -59,7 +59,10 @@ function fakeApi(rows: CommandRow[], o: Opts = {}) {
       }
       return row();
     }),
-    patch: vi.fn(async () => row()),
+    patch: vi.fn(async (path: string, body?: unknown) => {
+      calls.push({ m: 'PATCH', p: path, b: body });
+      return row();
+    }),
     put: vi.fn(async () => ({})),
     del: vi.fn(async (path: string) => {
       calls.push({ m: 'DELETE', p: path });
@@ -74,6 +77,10 @@ function termRow(id: number): TermSessionRow {
     id, title: `lp-${id}`, cwd: '', shell: 'bash', created_at: 0, tmux_name: `lp-${id}`,
     history_limit: 20000, last_attached_at: 0, alive: true,
   };
+}
+
+function busy(o: Partial<BusyEntry> = {}): BusyEntry {
+  return { session_id: 1, busy: false, foreground: '', shell_name: 'bash', ...o };
 }
 
 let api = fakeApi([]);
@@ -112,11 +119,20 @@ describe('快捷命令 store', () => {
     expect(api.calls.some((c) => c.m === 'DELETE' && c.p === '/api/commands/3')).toBe(true);
   });
 
-  it('move 带上方向', async () => {
+  it('move 的字段名必须是 dir：后端 JSON 解码拒绝未知字段', async () => {
     const s = useQuickCmdStore();
     await s.move(4, 'up');
     const call = api.calls.find((c) => c.p === '/api/commands/4/move');
-    expect(call).toMatchObject({ m: 'POST', b: { direction: 'up' } });
+    expect(call).toMatchObject({ m: 'POST', b: { dir: 'up' } });
+  });
+
+  // 后端的 PATCH 走的是与 POST 同样的必填校验，且拒绝未知字段：
+  // 只发改动的几个字段会被"名称必填"挡掉，多发一个 sort 会被 400 挡掉。
+  it('update 交完整字段（name/command/cwd/need_confirm）', async () => {
+    const s = useQuickCmdStore();
+    await s.update(2, { name: '新名', command: 'ls', cwd: '', need_confirm: true });
+    const call = api.calls.find((c) => c.m === 'PATCH');
+    expect(call?.b).toEqual({ name: '新名', command: 'ls', cwd: '', need_confirm: true });
   });
 });
 
@@ -306,13 +322,60 @@ describe('describeRun（忙闲文案）', () => {
     expect(t).not.toContain('bash'); // 前台就是 shell 本身，没必要当"进程名"显示
   });
 
-  function busy(o: Partial<BusyEntry>): BusyEntry {
-    return { session_id: 1, busy: false, foreground: '', shell_name: 'bash', ...o };
-  }
-
   it('未知：不含"忙"也不含"空闲"，避免读成确定结论', () => {
     const t = describeRun(undefined);
     expect(t).not.toContain('忙');
     expect(t).not.toContain('空闲');
+  });
+});
+
+describe('runHint（磁贴上的"会落到哪"提示）', () => {
+  function withBusy(map: Record<number, Partial<BusyEntry>>, ids = [1, 2]) {
+    const term = useTerminalStore();
+    term.sessions = ids.map(termRow);
+    api = fakeApi([row()], { busy: map });
+    setApi(api.api as never, location as never);
+    return useQuickCmdStore();
+  }
+
+  // 提示不能假装知道命令会进哪个会话：挑目标是后端的规则
+  // （最少被触碰的那个），前端复制一份迟早和它分家，届时每次提示都在骗人。
+  it('有空闲会话时说"直接执行"，不点名下哪个会话', async () => {
+    const s = withBusy({ 1: { busy: true, foreground: 'apt' }, 2: { busy: false } });
+    await s.refreshBusy();
+    expect(s.runHint).toContain('直接执行');
+    expect(s.runHint).not.toContain('lp-1');
+    expect(s.runHint).not.toContain('lp-2');
+  });
+
+  it('一个会话都没有时说"会新建会话"，不说"直接执行"', () => {
+    const s = withBusy({}, []);
+    expect(s.runHint).toContain('新建');
+    expect(s.runHint).not.toContain('直接执行');
+  });
+
+  it('全会忙时说"会新建会话"（D20）', async () => {
+    const s = withBusy({ 1: { busy: true, foreground: 'yes' }, 2: { busy: true, foreground: 'apt' } });
+    await s.refreshBusy();
+    expect(s.runHint).toContain('新建');
+    expect(s.runHint).not.toContain('直接执行');
+  });
+
+  it('忙闲查不到时不承诺任何事', async () => {
+    const s = withBusy({}); // 后端一个都没答
+    await s.refreshBusy();
+    expect(s.runHint).not.toContain('直接执行');
+    expect(s.runHint).not.toContain('新建');
+  });
+});
+
+// 终端标签上的"· 忙"（原型 lp-2 · 忙）。标签宽度只有那么多，
+// 文案必须短；且"不知道"时必须返回空串 —— 标签上挂个"状态未知"
+// 会比不挂更让人以为出了故障。
+describe('tabBadge（终端标签的忙闲角标）', () => {
+  it('忙 → "忙"，空闲或不知道 → 空串', () => {
+    expect(tabBadge(busy({ busy: true, foreground: 'apt' }))).toBe('忙');
+    expect(tabBadge(busy({ busy: false }))).toBe('');
+    expect(tabBadge(undefined)).toBe('');
   });
 });

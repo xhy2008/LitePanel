@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import ServicesPanel from '../components/services/ServicesPanel.vue';
+import CommandsPanel from '../components/quickcmd/CommandsPanel.vue';
 
 // 快捷命令标签页：服务管理 + 快捷命令两个分段（原型 p-quick 的 seg）。
 // 默认停在服务管理 —— 这一页的主用途是看服务在不在线。
@@ -22,9 +23,8 @@ const seg = ref<'svc' | 'cmd'>('svc');
          不在眼前的分段不该继续吃 WS 帧和渲染。 -->
     <ServicesPanel v-if="seg === 'svc'" class="svc-pane" />
 
-    <div v-else class="cmd-pane">
-      <div class="todo">快捷命令列表将在 M5 落地。</div>
-    </div>
+    <!-- v-if 同上一个分段：切走就卸载，命令列表不该在看不见时继续拉。 -->
+    <CommandsPanel v-if="seg === 'cmd'" />
   </div>
 </template>
 
@@ -52,11 +52,5 @@ const seg = ref<'svc' | 'cmd'>('svc');
   background: var(--accent);
   color: #fff;
   font-weight: 600;
-}
-.todo {
-  font-size: 12px;
-  color: var(--text-mute);
-  padding: 20px 0;
-  text-align: center;
 }
 </style>

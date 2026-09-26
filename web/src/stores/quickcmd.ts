@@ -28,6 +28,14 @@ export function describeRun(state?: BusyEntry): string {
   return `忙${what}`;
 }
 
+/**
+ * 终端标签上的角标。标签宽度有限，只放得下一个字；
+ * "不知道"返回空串 —— 挂个"状态未知"比不挂更像故障。
+ */
+export function tabBadge(state?: BusyEntry): string {
+  return state?.busy ? '忙' : '';
+}
+
 interface State {
   items: CommandRow[];
   loaded: boolean;
@@ -46,6 +54,29 @@ interface State {
 
 export const useQuickCmdStore = defineStore('quickcmd', {
   state: (): State => ({ items: [], loaded: false, loading: false, error: '', notice: '', busy: {}, pending: {} }),
+
+  getters: {
+    /**
+     * 磁贴下方那句"点了会怎样"。
+     *
+     * 它刻意不点名下目标会话：挑哪个会话是后端的规则（取最近最少使用的
+     * 空闲会话），前端复制一份迟早和它分家 —— 届时每一次提示都在骗人，
+     * 而用户是按提示决定要不要等的。这里只说能确证的部分。
+     *
+     * 忙闲查不到时不承诺任何事：说"直接执行"是骗人，说"会新建"也是。
+     */
+    runHint(state): string {
+      // 一个会话都没有时"会新建"是能确证的（D20：没有可用会话就新建）。
+      // 注意它和"忙闲查不到"不同 —— 后者什么也不能承诺，两者不能合并成
+      // 同一个空 busy，否则要么把未知说成新建，要么把确证说成未知。
+      const term = useTerminalStore();
+      if (term.sessions.length === 0) return '执行位置：没有终端会话，会先新建一个';
+      const ids = Object.keys(state.busy);
+      if (ids.length === 0) return '执行位置：由终端会话决定';
+      const anyIdle = ids.some((k) => !state.busy[Number(k)].busy);
+      return anyIdle ? '执行位置：空闲的终端会话，直接执行' : '执行位置：当前会话都在忙，会新建会话';
+    },
+  },
 
   actions: {
     clearNotice() {
@@ -75,8 +106,11 @@ export const useQuickCmdStore = defineStore('quickcmd', {
       await this.load();
     },
 
-    async update(id: number, input: Partial<CommandInput>): Promise<void> {
+    async update(id: number, input: CommandInput): Promise<void> {
       const { api } = getApi();
+      // 交完整字段而不是 PATCH 语义下的"只传改动的"：后端的 PATCH 走的是
+      // 与 POST 同一套必填校验（名称/命令必填），少发一个就被"名称必填"
+      // 挡掉，报错原因还指着用户没动过的那个框。
       await api.patch<CommandRow>(`/api/commands/${id}`, input);
       this.error = '';
       await this.load();
@@ -91,7 +125,9 @@ export const useQuickCmdStore = defineStore('quickcmd', {
     async move(id: number, direction: 'up' | 'down'): Promise<void> {
       const { api } = getApi();
       try {
-        await api.post(`/api/commands/${id}/move`, { direction });
+        // 字段名必须与后端 commandMoveJSON 一致：解码开了 DisallowUnknownFields，
+        // 写成 direction 会被直接 400，而报错原因只有一个"字段未知"。
+        await api.post(`/api/commands/${id}/move`, { dir: direction });
         this.error = '';
       } catch (e) {
         this.error = messageOf(e);

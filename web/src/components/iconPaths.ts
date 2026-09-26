@@ -40,6 +40,12 @@ export const PATHS: Record<string, string[]> = {
   copy: ['M9 9h10v12H9z', 'M15 9V3H5v10h4'],
   trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 14h10l1-14', 'M10 11v6', 'M14 11v6'],
   close: ['M6 6l12 12', 'M18 6 6 18'],
+
+  // ---- 快捷命令 ----
+  arrow_upward: ['M12 19V5', 'M5 12l7-7 7 7'],
+  arrow_downward: ['M12 5v14', 'M19 12l-7 7-7-7'],
+  edit: ['M4 20h4L20 8l-4-4L4 16z', 'M14 6l4 4'],
+  hourglass_top: ['M6 3h12', 'M6 21h12', 'M7 3c0 5 5 5 5 9s-5 4-5 9', 'M17 3c0 5-5 5-5 9s5 4 5 9'],
 };
 
 /** 这个名字有没有对应的图形。 */
