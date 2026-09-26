@@ -206,6 +206,34 @@ func affected(res sql.Result, notFound error) error {
 	return nil
 }
 
+// SetSessionDeath 写一次尸检结果：alive 位 + 死因。
+//
+// exitStatus == nil 的意思是"这一列保持原样"，不是"死因未知" ——
+// 用 *int 而不是 0/-1 之类的哨兵值，是因为 0（正常退出）和 -1
+// （凭空消失）都是**合法的观测值**，任何哨兵都会跟真值撞车。
+func SetSessionDeath(db *store.DB, id int64, alive bool, exitStatus *int) error {
+	n := 0
+	if alive {
+		n = 1
+	}
+	if exitStatus == nil {
+		_, err := db.SqlDB().Exec(`UPDATE term_sessions SET alive=? WHERE id=?`, n, id)
+		return err
+	}
+	_, err := db.SqlDB().Exec(`UPDATE term_sessions SET alive=?, exit_status=? WHERE id=?`,
+		n, *exitStatus, id)
+	return err
+}
+
+// ClearSessionDeath 复活一个会话：alive 回 1，死因清空回 NULL。
+//
+// 死因必须一起清：留着旧退出码，前端会给一个正在跑的会话挂上
+// 「异常退出 9」。
+func ClearSessionDeath(db *store.DB, id int64) error {
+	_, err := db.SqlDB().Exec(`UPDATE term_sessions SET alive=1, exit_status=NULL WHERE id=?`, id)
+	return err
+}
+
 // ReconcileResult 是一次对账的产出。
 type ReconcileResult struct {
 	Adopted []int64 // tmux 里有、库里没有 → 新建了记录
@@ -244,6 +272,17 @@ func ReconcileMeta(db *store.DB, list func() ([]string, error)) (ReconcileResult
 				return res, err
 			}
 			res.Died = append(res.Died, s.ID)
+		}
+	}
+
+	for _, s := range existing {
+		// tmux 里名字又出现了 → 复活。没有这条，一次 tmux 没起来的
+		// 启动会把全部行标死，而之后无论 tmux 怎么恢复，这些行都
+		// 永远停在 alive=0 —— 面板会谎报到有人手动删为止。
+		if live[s.ID] && !s.Alive {
+			if err := ClearSessionDeath(db, s.ID); err != nil {
+				return res, err
+			}
 		}
 	}
 

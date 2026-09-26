@@ -239,3 +239,297 @@ func TestCreateSessionDuplicateDoesNotKillOther(t *testing.T) {
 		t.Fatal("创建失败时把占名的别人会话杀了 —— handoff 之前的路径不许清理")
 	}
 }
+
+// 接管的外部会话也必须补上 remain-on-exit。
+//
+// 漏掉它的后果不是"少个选项"而是判错死因：Reconcile 收编的会话
+// （手工起的 lp-*）没开这个选项，shell 正常 exit 时会话整个消失，
+// 死因判定读不到尸体 → 被归进"异常消失"，一排正常退出的会话全
+// 变成要人手动清理的僵尸记录 —— 恰好是用户最反感的那种。
+func TestReconcileArmsAdoptedSession(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx := newServiceEnv(t)
+	const id = 9301
+	name := TmuxName(id)
+	runTMUX(t, "new-session", "-d", "-s", name)
+	defer runTMUX(t, "kill-session", "-t", name)
+
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// show-options 的 -t 不认 = 精确前缀（实测报 no such window），
+	// 这里用裸名：私有 socket 的测试环境里没有 lp-9301x 兄弟名可撞。
+	out := strings.TrimSpace(runTMUXQuiet(t,
+		"show-options", "-t", name, "remain-on-exit"))
+	if !strings.Contains(out, "on") {
+		t.Fatalf("收编的会话没被补上 remain-on-exit: %q", out)
+	}
+}
+
+// ---- 死因清理（Service.List 的尸检规程）----
+//
+// 规则（用户裁决）：status==0 自动删除不留痕迹；status!=0 与凭空消失
+// 都是"异常"，保留现场直到用户手动删除；server 连不上是"未知"，
+// 什么都不动。List 每 3 秒被前端轮询一次，这就是清理的执行点。
+//
+// 隔离说明：整个测试包共用一个 tmux server（TMUX_TMPDIR 在 TestMain
+// 里指到临时目录），所以这些测试**不许** kill-server —— 会把别的
+// 测试正在用的会话一起杀掉。每个测试用 t.Cleanup 清掉自己的会话
+// （t.Fatal 之后 Cleanup 照跑），失败的测试不会往后面漏 lp-<id> 尸体。
+
+// newSweepEnv 建一个会话并注册清理。
+func newSweepEnv(t *testing.T, title string) (*Service, context.Context, SessionMeta) {
+	t.Helper()
+	svc, ctx := newServiceEnv(t)
+	meta, err := svc.Create(ctx, SessionInput{Title: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, meta.TmuxName) })
+	return svc, ctx, meta
+}
+
+// waitCorpse 等 shell 真正死掉（尸体出现即可；删除是 List 的事）
+func waitCorpse(t *testing.T, name string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		out := strings.TrimSpace(runTMUXQuiet(t,
+			"list-panes", "-t", "="+name, "-F", "#{pane_dead}"))
+		if strings.HasPrefix(out, "1") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("等不到 %s 的尸体", name)
+}
+
+// 规则 1：正常退出（status 0）—— 行、尸体、记录全部消失。
+func TestListAutoDeletesCleanExit(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "自动清理")
+	waitPrompt(t, meta.TmuxName) // waitPrompt 跑 true → 裸 exit 继承 0 退出码
+	runTMUX(t, "send-keys", "-t", meta.TmuxName+":.0", "exit", "Enter")
+	// 等尸体落定再 List（真实场景由 3 秒轮询自己撞上，这里要确定性）
+	waitCorpse(t, meta.TmuxName)
+
+	items, err := svc.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("正常退出的会话必须从列表消失, got %+v", items)
+	}
+	if _, err := GetSessionMeta(svc.db, meta.ID); err == nil {
+		t.Fatal("库里还留着正常退出的行 —— 用户要求不留任何多余痕迹")
+	}
+	// 不能用 HasSession 判尸体：探针实测 has-session 对尸体也返回 0。
+	// 尸体清没清干净要问 list-sessions —— 名字不再出现才算没了。
+	out := runTMUXQuiet(t, "list-sessions", "-F", "#{session_name}")
+	if strings.Contains(out, meta.TmuxName) {
+		t.Fatalf("tmux 里的尸体也得清掉: %s", out)
+	}
+}
+
+// 规则 2：异常退出（status!=0）—— 保留、带退出码、反复 List 幂等
+// （轮询每 3 秒撞一次 List，幂等不是奢侈品而是必需品）。
+func TestListKeepsAbnormalExit(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "炸了")
+	waitPrompt(t, meta.TmuxName)
+	runTMUX(t, "send-keys", "-t", meta.TmuxName+":.0", "exit 7", "Enter")
+	waitCorpse(t, meta.TmuxName)
+
+	for round := 1; round <= 2; round++ {
+		items, err := svc.List(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("第%d轮 异常会话必须保留, got %+v", round, items)
+		}
+		if items[0].Alive {
+			t.Fatal("异常会话不该是活的")
+		}
+		if items[0].ExitStatus == nil || *items[0].ExitStatus != 7 {
+			t.Fatalf("退出码必须是 7（前端要显示死因）, got %v", items[0].ExitStatus)
+		}
+	}
+}
+
+// 规则 3：会话凭空消失（外部 kill 掉这一个会话）也是异常，
+// 用 ExitVanished(-1) 和真实退出码区分 —— 两者都要人手动清。
+// 前提：别的会话还活着，server 还在 —— 才能把"这个会话没了"
+// 和"tmux 整体问不到"分开（后者见下一条测试）。
+func TestListVanishedCountsAbnormal(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "被杀")
+	witness, err := svc.Create(ctx, SessionInput{Title: "证人"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, witness.TmuxName) })
+
+	if err := KillSession(DefaultBin, meta.TmuxName); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var victim *SessionMeta
+	for i := range items {
+		if items[i].ID == meta.ID {
+			victim = &items[i]
+		}
+	}
+	if victim == nil {
+		t.Fatal("异常消失的行必须保留")
+	}
+	if victim.Alive {
+		t.Fatal("被外部杀掉的会话不该是活的")
+	}
+	if victim.ExitStatus == nil || *victim.ExitStatus != ExitVanished {
+		t.Fatalf("凭空消失应记 ExitVanished(-1), got %v", victim.ExitStatus)
+	}
+}
+
+// 规则 4：tmux 整体问不到是"未知"，不是"死了" —— 报错但什么都不动。
+// 这条防的是最恶心的连锁：tmux 暂时不可达（升级中/socket 抖动）时
+// 把全部会话标记成异常，用户醒来一排僵尸记录等着手动删。
+//
+// 怎么制造"问不到"而不 kill-server（共享服务器杀不得）：bin 指向
+// 一个不存在的路径。生产里等价物是 tmux 被卸载/socket 目录被清。
+func TestListUnreachableTouchedNothing(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "幸存")
+
+	svc.bin = "/nonexistent/tmux-nope"
+	if _, err := svc.List(ctx); err == nil {
+		t.Fatal("tmux 不可达时 List 必须报错（前端要显示'未知'而不是空列表）")
+	}
+	if _, err := GetSessionMeta(svc.db, meta.ID); err != nil {
+		t.Fatalf("未知状态下不许删行: %v", err)
+	}
+}
+
+// 真实崩溃模拟：面板与 tmux 一起死（CI 式 kill-server），退出码必须
+// 已经落进库 —— 重启后尸体没了，死因也不能退化成"未知消失"。
+// 唯一允许 kill-server 的测试：见上面的隔离说明；跑完 server 是空的，
+// 后面的用例自己会把它拉起来（tmuxReady）。
+func TestExitCodeSurvivesFullCrash(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "崩")
+	waitPrompt(t, meta.TmuxName)
+	runTMUX(t, "send-keys", "-t", meta.TmuxName+":.0", "exit 9", "Enter")
+	waitCorpse(t, meta.TmuxName)
+	if _, err := svc.List(ctx); err != nil {
+		t.Fatal(err) // 这一次 List 要把 9 持久化
+	}
+	runTMUX(t, "kill-server") // 面板没来得及看，server 也没了（真实崩溃序）
+
+	// 重启后 server 没了：会话只活在 server 内存里，server 没了就是
+	// 确凿的死（不是"未知"）。这一行的死因在第一次闻到尸体时就落了
+	// 库，此刻必须原样读得出来 —— 不能退化成 -1"凭空消失"。
+	items, err := svc.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ExitStatus == nil || *items[0].ExitStatus != 9 {
+		t.Fatalf("退出码必须在第一次观察时就落库, got %+v", items)
+	}
+}
+
+// 规则 0：socket 指错 → 全体误标"消失"→ 配置修好后必须能自愈。
+//
+// 场景在真实世界是真的：TMUX_TMPDIR 配错/被清一次，一轮轮询就把
+// 全部行标成异常消失；之后就算 tmux"回来"了，没有复活逻辑的话这些
+// 行也永远停在 alive=0 —— 面板谎报到有人手动删为止。复活是"标消失"
+// 能选可恢复方向的前提。
+func TestReviveAfterVanished(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "会复活")
+
+	// 制造一轮"server 没了"（不真杀共享 server：bin 指向不存在的 socket
+	// —— tmux 的 socket-path 参数可以做到，但最省的是直接翻库模拟上一轮
+	// 的产物：alive=0 + -1。真实写入路径由 markAllVanished 的调用测试覆盖）
+	if err := SetSessionDeath(svc.db, meta.ID, false, ptrOf(ExitVanished)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.List(ctx) // tmux 好好活着，名字也在 → 必须复活
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || !items[0].Alive {
+		t.Fatalf("名字重新出现必须复活, got %+v", items)
+	}
+	if items[0].ExitStatus != nil {
+		t.Fatalf("复活后死因必须清空（别让运行中的会话挂着旧退出码）, got %v", *items[0].ExitStatus)
+	}
+	// 库里也得是复活态（内存对了库没对 = 下一轮又翻车）
+	got, err := GetSessionMeta(svc.db, meta.ID)
+	if err != nil || !got.Alive || got.ExitStatus != nil {
+		t.Fatalf("库没刷成复活态: %+v err=%v", got, err)
+	}
+}
+
+func ptrOf(v int) *int { return &v }
+
+// 真实世界最常见的"server 没了"：最后一个会话被外部 kill-session，
+// tmux 顺手把 server 也退了。此时库里还记着 alive=1 的行必须改判
+// 消失 —— 不标的话面板永远谎报"会话在线"，点进去才是"没这个会话"。
+func TestMarkAllVanishedOnServerExit(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx, meta := newSweepEnv(t, "最后一个")
+	other, err := svc.Create(ctx, SessionInput{Title: "陪葬"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, other.TmuxName) })
+
+	// 一次杀光会话：最后一个倒下时 server 整个退出（tmux 的固有行为）
+	_ = KillSession(DefaultBin, other.TmuxName)
+	_ = KillSession(DefaultBin, meta.TmuxName)
+
+	items, err := svc.List(ctx) // server 已没了 → ErrNoServer 分支
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Alive {
+			t.Fatalf("server 没了还报 alive: %+v", it)
+		}
+		if it.ExitStatus == nil || *it.ExitStatus != ExitVanished {
+			t.Fatalf("server 没了应记 ExitVanished, got %+v", it)
+		}
+	}
+	if len(items) != 2 {
+		t.Fatalf("行要留着（可复活 + 显示历史），got %+v", items)
+	}
+}
+
+// Reconcile（启动对账）也必须能复活 —— List 那条只在运行期跑，
+// 而"面板重启后满屏异常消失"正是启动这一瞬间最容易出现的观感。
+func TestReconcileRevivesRows(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx := newServiceEnv(t)
+	meta, err := svc.Create(ctx, SessionInput{Title: "重启幻觉"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, meta.TmuxName) })
+
+	if err := SetSessionDeath(svc.db, meta.ID, false, ptrOf(ExitVanished)); err != nil {
+		t.Fatal(err) // 模拟"上一次启动时 tmux 恰好不在"
+	}
+	if err := NewService(svc.db, DefaultBin).Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetSessionMeta(svc.db, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Alive || got.ExitStatus != nil {
+		t.Fatalf("tmux 里明明活着，对账必须复活并清死因: %+v", got)
+	}
+}
