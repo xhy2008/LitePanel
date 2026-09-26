@@ -115,3 +115,7 @@ func splitPaneLine(line string) (name, dead, status string, ok bool) {
 	}
 	return parts[0], strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), true
 }
+
+// ExitVanished：会话凭空消失（外部 kill-session，或面板与 tmux 一起死
+// 且没来得及记码）。与真实退出码同域存放，前端显示成"异常消失"。
+const ExitVanished = -1

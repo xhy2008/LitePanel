@@ -94,19 +94,42 @@ func CreateSession(bin, name string, o SessionOpts) (*Session, error) {
 	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("new-session %s: %v (%s)", name, err, bytes.TrimSpace(out))
 	}
+	// 从这里开始，tmux 里那个叫 name 的会话是**我们刚造的**，后面任何一步
+	// 失败都得把它收掉 —— 否则它是个没人登记过的残：死因清理扫不到它
+	//（靠库里的行反推），名字又把它占死：SQLite 的 INTEGER PRIMARY KEY 会
+	// 复用刚删掉的 rowid（实测），下一次建会话正好撞上 duplicate session。
+	//
+	// handoff 不是多余的保险，它圈出两件事的分界：
+	//  1. 上面那次 new-session **失败**时也常常 tmux 里有个同名会话
+	//     （duplicate）。那个是别人的（手工建的/收编来的），无条件
+	//     defer-kill 就会把人家的会话杀了 —— 比留残严重得多。
+	//  2. 成功路径必须在 return 之前置位 —— defer 在 return 表达式
+	//     求值**之后**才跑，写成 `return Attach(...)` 的话，刚建好的
+	//     会话会被自己的清理杀掉。
+	handoff := false
+	defer func() {
+		if !handoff {
+			_ = KillSession(bin, name)
+		}
+	}()
+
 	// remain-on-exit：整条"退出码=死因"规则（见 death.go）的地基。
 	// 不开这个选项，shell 退出时连会话一起消失，"正常退出"和
 	// "被杀/重启"就永远分不出来 —— 实测三种死法的事件流一模一样。
-	// 失败不致命（会话已建起来）：顶多这个会话退出后按"异常消失"
-	// 保守处理，方向是对的。
-	_, _ = exec.Command(bin, "set-option", "-t", name,
-		"remain-on-exit", "on").CombinedOutput()
+	if err := ArmCorpse(context.Background(), bin, name); err != nil {
+		return nil, err
+	}
 	if o.HistoryLimit > 0 {
 		// 失败不致命：会话已建起来，限流没生效顶多历史短点
 		_, _ = exec.Command(bin, "set-option", "-t", name,
 			"history-limit", strconv.Itoa(o.HistoryLimit)).CombinedOutput()
 	}
-	return Attach(bin, name)
+	sess, err := Attach(bin, name)
+	if err != nil {
+		return nil, err
+	}
+	handoff = true
+	return sess, nil
 }
 
 // Attach 对已存在的会话开 control 连接。
@@ -652,4 +675,22 @@ func QuoteArg(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\\''`) + "'"
+}
+
+// ArmCorpse 给一个已存在的会话开启 remain-on-exit（尸检的前提）。
+//
+// 新建与收编都必须调用：收编来的手工会话没开这个选项的话，正常
+// 退出会连尸体一起消失，死因判定只能把它归为"异常消失"。
+//
+// 必须独立成命令：create-session 的 -t remain-on-exit 格式串只作用
+// 于新建窗口，不会变成会话级选项（实测）。设不上就直接报错，不
+// 要像早先那样用 `_ = exec...` 吞掉 —— 静默漏设会让所有会话重新
+// 变回"死因看不出来"，而这是没有错误信号的故障。
+func ArmCorpse(ctx context.Context, bin, name string) error {
+	if out, err := exec.CommandContext(ctx, bin, "set-option", "-t", name,
+		"remain-on-exit", "on").CombinedOutput(); err != nil {
+		return fmt.Errorf("set-option remain-on-exit %s: %v (%s)",
+			name, err, bytes.TrimSpace(out))
+	}
+	return nil
 }

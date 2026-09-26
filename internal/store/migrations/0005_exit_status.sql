@@ -1,0 +1,13 @@
+-- 0005_exit_status: 会话的死因（M5 收尾，用户裁决的落地）。
+--
+-- 语义（NULL 不是 0，三者必须在类型层就分得开）：
+--   NULL  从未观测到退出 / 还活着
+--   -1    凭空消失（ExitVanished）：外部 kill-session、或面板与 tmux
+--         一起死且来不及记码 —— 异常，保留待手动删
+--   0     正常退出 —— 下一次 List 自动删行，不留痕迹
+--   >0    shell 的非零退出码 —— 异常，保留待手动删
+--
+-- 退出码在**第一次观察到尸体时**就写死在这里：尸体本身可以比持久化
+-- 更短命（kill-server 会把尸体连 tmux 一起摧毁），只信现场等于崩一次
+-- 丢一次死因。见 death_test.go TestExitCodeSurvivesFullCrash。
+ALTER TABLE term_sessions ADD COLUMN exit_status INTEGER;

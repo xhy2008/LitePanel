@@ -59,6 +59,9 @@ func (s *Service) Create(ctx context.Context, in SessionInput) (SessionMeta, err
 	if err != nil {
 		// tmux 没建起来 → 库里的行是纯噪音，立刻收回
 		_ = DeleteSessionMeta(s.db, meta.ID)
+		// tmux 侧半成功残骸由 CreateSession 自己负责（见 session.go 里
+		// created 标志那段）：这里再清一次是重复所有权，而且漏掉
+		// termws 那条直接调 CreateSession 的路。
 		return SessionMeta{}, fmt.Errorf("创建 tmux 会话: %w", err)
 	}
 	// 用完必须关：CreateSession 顺带 attach 了一条控制连接，而 REST 这条路上

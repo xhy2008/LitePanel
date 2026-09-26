@@ -66,6 +66,9 @@ type SessionMeta struct {
 	CreatedAt      int64  `json:"created_at"`
 	LastAttachedAt int64  `json:"last_attached_at"`
 	Alive          bool   `json:"alive"`
+	// ExitStatus 死因：nil=未知/活着，-1=凭空消失（ExitVanished），
+	// 0=正常退出（会被下一次 List 清掉），>0=异常退出码。见 0005 迁移。
+	ExitStatus *int `json:"exit_status"`
 }
 
 // SessionInput 是创建入参。HistoryLimit=0 表示用默认档（不是"存 0"——
@@ -96,7 +99,7 @@ func (in SessionInput) normalized() (SessionInput, error) {
 }
 
 const sessionCols = `id, tmux_name, IFNULL(title,''), IFNULL(cwd,''), IFNULL(shell,''),
-	history_limit, created_at, IFNULL(last_attached_at,0), alive`
+	history_limit, created_at, IFNULL(last_attached_at,0), alive, exit_status`
 
 func scanSession(row interface{ Scan(...any) error }) (SessionMeta, error) {
 	var (
@@ -104,7 +107,7 @@ func scanSession(row interface{ Scan(...any) error }) (SessionMeta, error) {
 		alive int
 	)
 	err := row.Scan(&s.ID, &s.TmuxName, &s.Title, &s.Cwd, &s.Shell,
-		&s.HistoryLimit, &s.CreatedAt, &s.LastAttachedAt, &alive)
+		&s.HistoryLimit, &s.CreatedAt, &s.LastAttachedAt, &alive, &s.ExitStatus)
 	s.Alive = alive != 0
 	return s, err
 }

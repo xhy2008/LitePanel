@@ -10,9 +10,12 @@ package terminal
 // 事后 list-sessions 也只说"名字不在"。
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,4 +189,53 @@ func TestCreateSessionLeavesCorpse(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("CreateSession 建的会话退出后没留下尸体（pane_dead=1 + 退出码），最后看到 %q", last)
+}
+
+// Create 失败时必须把 tmux 侧"半成功"的会话一起清掉。
+//
+// 构造办法：拿一个包装脚本当真 bin —— new-session 照做，但 set-option
+// 一律失败（= ArmCorpse 失败的真实场景之一）。这时 CreateSession 报错，
+// 会话却已经躺在 tmux 里且没人登记过它：漏清的话它躲得过死因清理，
+// 还会让下一次的 lp-<id> 直接 duplicate session。
+func TestCreateFailureCleansHalfMadeSession(t *testing.T) {
+	tmuxReady(t)
+	dir := t.TempDir()
+	wrap := filepath.Join(dir, "tmux-wrap.sh")
+	body := "#!/bin/sh\nif [ \"$1\" = set-option ]; then echo 'boom' >&2; exit 1; fi\nexec tmux \"$@\"\n"
+	if err := os.WriteFile(wrap, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db := openTestDB(t)
+	svc := NewService(db, wrap)
+
+	if _, err := svc.Create(context.Background(), SessionInput{Title: "残骸"}); err == nil {
+		t.Fatal("set-option 失败时 Create 必须报错（ArmCorpse 是可失败依赖）")
+	}
+	// 新库 → rowid 1 → lp-1（名字可推算）
+	name := TmuxName(1)
+	out := runTMUXQuiet(t, "list-sessions", "-F", "#{session_name}")
+	if strings.Contains(out, name) {
+		t.Fatalf("创建失败后 tmux 里不该留下 %s（残骸没人管 + 名字被占死）:\n%s", name, out)
+	}
+	if items, _ := ListSessionsMeta(db); len(items) != 0 {
+		t.Fatalf("创建失败后库里不该留行: %+v", items)
+	}
+}
+
+// new-session 失败（名字被占）时，占名的会话是**别人的**，一票否决
+// 不许清理逻辑碰它。这条钉住 defer 里 handoff 标志的另一半：没有它，
+// “创建失败就杀同名会话”会把用户手工建/收编来的会话杀了 —— 比留残
+// 严重得多。
+func TestCreateSessionDuplicateDoesNotKillOther(t *testing.T) {
+	tmuxReady(t)
+	name := fmt.Sprintf("lp-dup-%d", time.Now().UnixNano())
+	runTMUX(t, "new-session", "-d", "-s", name)
+	defer runTMUX(t, "kill-session", "-t", name)
+
+	if _, err := CreateSession(DefaultBin, name, SessionOpts{}); err == nil {
+		t.Fatal("同名会话存在时 CreateSession 必须失败")
+	}
+	if !tmuxHas(name) {
+		t.Fatal("创建失败时把占名的别人会话杀了 —— handoff 之前的路径不许清理")
+	}
 }
