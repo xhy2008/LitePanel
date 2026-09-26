@@ -12,6 +12,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -471,4 +474,120 @@ func TestBusyReflectsConfiguredWindow(t *testing.T) {
 	if plain[first.SessionID].Busy {
 		t.Fatalf("默认 2 秒窗口下该判空闲: %+v", plain)
 	}
+}
+
+// 快捷命令等效于用户手打：注入时一次 send-keys 就是命令原文，
+// 不许掺任何标注字节。
+//
+// 设计方案 16.3 原文写的是"注入并标注「来自快捷命令」"，2026-09 裁决改为
+// 不改字节流、当作用户输入等效处理。因为那条标注只有两种实现，两种都更糟：
+// 往 pane 里多打一行带颜色的注释，它会进 shell 历史、混进 cat 的输出、被
+// less/vim 当成真输入吃掉；给 xterm 加高亮则要求面板改写 tty 字节流。
+//
+// 观测量：PATH 前面挡一个记录 argv 的 tmux 包装脚本，底下 exec 真 tmux。
+// 不用 capture-pane 找"屏幕上没有标注字样"—— pane 上有整行 PS1 回显，
+// 长得跟标注很像，那种断言会被回显糊过去；也不用 shell history：
+// ~/.bash_history 跨会话共享，"历史里只有我这两条"从来就不成立。
+// 包装脚本给出的是"到底发了什么参数"，逐字精确，且命令照样真的执行。
+func TestInjectSendsNothingButTheCommand(t *testing.T) {
+	in, _ := newInjector(t, DefaultBusyWindow)
+	logged := withRecordingTmux(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		why  string
+		cmd  Command
+		want []string // 期望的、逐字等于原文的注入内容（不含 Enter）
+	}{
+		{"无 cwd", Command{Name: "看盘", Command: "df -h"}, []string{"df -h"}},
+		// cwd 是唯一一条额外文本，且必须是这一条：它由 quoteShell 包过，
+		// 除此之外不许有任何"顺便打一行说明"。
+		{"带 cwd", Command{Name: "看盘", Command: "df -h", Cwd: "/tmp/a b"},
+			[]string{"cd '/tmp/a b'", "df -h"}},
+	}
+	for _, c := range cases {
+		t.Run(c.why, func(t *testing.T) {
+			logged.Reset()
+			res, err := in.Run(ctx, c.cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trackSession(t, terminal.TmuxName(res.SessionID))
+			if got := logged.Injections(); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("注入发的文本必须逐字等于命令本体\n实际=%q\n期望=%q", got, c.want)
+			}
+		})
+	}
+}
+
+// ---------- 记录 argv 的 tmux 包装 ----------
+
+type tmuxLog struct {
+	path string
+}
+
+// withRecordingTmux 把目录里放一个名为 tmux 的包装脚本并挂到 PATH 最前面。
+// 它把每次调用的参数记到文件里，然后 exec 真 tmux —— 会话、shell、tty 全是
+// 真的，只是顺便留下"到底发了什么"。
+func withRecordingTmux(t *testing.T) *tmuxLog {
+	t.Helper()
+	hasTmux(t)
+	real, err := exec.LookPath(terminal.DefaultBin)
+	if err != nil {
+		t.Skipf("没有 tmux: %v", err)
+	}
+	dir := t.TempDir()
+	log := &tmuxLog{path: filepath.Join(dir, "argv.log")}
+	wrap := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" >>" + log.path + "\n" +
+		"printf '\\0' >>" + log.path + "\n" +
+		"exec " + real + " \"$@\"\n"
+	if err := os.WriteFile(wrap, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+func (l *tmuxLog) Reset() { _ = os.Remove(l.path) }
+
+// Injections 返回每次 `send-keys -l -H …` 解回来的原文（顺序即调用顺序）。
+// Enter 那次调用不带 -l，天然不在里面；list-panes / new-session 之类
+// 状态查询同理。
+func (l *tmuxLog) Injections() []string {
+	b, err := os.ReadFile(l.path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, call := range strings.Split(string(b), "\x00") {
+		args := strings.Split(strings.TrimSuffix(call, "\n"), "\n")
+		if len(args) < 4 || args[0] != "send-keys" {
+			continue
+		}
+		var lit []string
+		for i, a := range args {
+			if a == "-H" {
+				lit = args[i+1:]
+				break
+			}
+		}
+		if lit == nil {
+			continue
+		}
+		buf := make([]byte, 0, len(lit))
+		for _, h := range lit {
+			v, err := strconv.ParseUint(h, 16, 8)
+			if err != nil {
+				out = append(out, "!无法解析的 hex:"+strings.Join(lit, " "))
+				break
+			}
+			buf = append(buf, byte(v))
+		}
+		if len(buf) > 0 {
+			out = append(out, string(buf))
+		}
+	}
+	return out
 }
