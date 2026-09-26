@@ -626,3 +626,59 @@ func TestSubscribeTriggersAttach(t *testing.T) {
 		t.Fatalf("订阅应让会话进入接管列表: %v", got)
 	}
 }
+
+// Create/Ensure 返回时，tmux 侧必须真的已经有这条 control 连接。
+//
+// 这条测的是"返回时机"而不是"最终会一致"：`tmux -CC attach` 是子进程，
+// Attach 返回时进程刚 fork，tmux 服务端还没注册这个 client。若 adopt 不等
+// 握手就返回，下面的计数会在 0 和 1 之间随机跳（实测会稳定看到 0），
+// 而跟着发出的 resize/按键正好落进空窗 —— 控制模式不回放历史，永久丢。
+//
+// 断言用 tmux 自己的 list-clients，不看桥接的 map：map 里记了一笔恰恰是
+// 这个 bug 的样子，拿它当证据就是替 bug 背书。
+func TestAdoptWaitsForTmuxHandshake(t *testing.T) {
+	m, _ := newManager(t)
+	id := testID()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := m.Create(ctx, id, terminal.SessionOpts{Cols: 90, Rows: 26}); err != nil {
+		t.Fatal(err)
+	}
+	if n := controlClientCount(t, id); n != 1 {
+		t.Fatalf("Create 返回时 tmux 侧有 %d 条 control 连接，应为 1（接管没等握手完成）", n)
+	}
+
+	// 撤掉接管，再走按需接管那条路：两条路都必须等
+	m.mu.Lock()
+	e := m.sess[id]
+	delete(m.sess, id)
+	m.mu.Unlock()
+	if e != nil {
+		_ = e.sess.Close()
+	}
+	waitFor(t, func() bool { return controlClientCount(t, id) == 0 }, "旧连接释放")
+
+	if err := m.Ensure(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if n := controlClientCount(t, id); n != 1 {
+		t.Fatalf("Ensure 返回时 tmux 侧有 %d 条 control 连接，应为 1", n)
+	}
+}
+
+func controlClientCount(t *testing.T, id string) int {
+	t.Helper()
+	out, err := exec.Command(terminal.DefaultBin, "list-clients",
+		"-t", "=lp-"+id).Output()
+	if err != nil {
+		return 0 // 问不到 = 一条也没有
+	}
+	n := 0
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}

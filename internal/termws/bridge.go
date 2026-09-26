@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"litepanel/internal/logx"
+
 	"litepanel/internal/terminal"
 )
 
@@ -49,6 +51,8 @@ type Hub interface {
 
 // Session 是桥接持有的一条 tmux 控制会话（实现者是 *terminal.Session）。
 type Session interface {
+	// Ready 在 attach 握手块结束时关闭。接管必须等它：见 Manager.adopt。
+	Ready() <-chan struct{}
 	Events() <-chan terminal.Event
 	Exited() <-chan struct{}
 	SendText(ctx context.Context, text string) error
@@ -128,7 +132,7 @@ func (m *Manager) Create(ctx context.Context, id string, o terminal.SessionOpts)
 	if err != nil {
 		return err
 	}
-	return m.adopt(id, sess)
+	return m.adopt(ctx, id, sess)
 }
 
 func (m *Manager) openNew(id string, o terminal.SessionOpts) (Session, error) {
@@ -183,11 +187,26 @@ func (m *Manager) attachNow(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return m.adopt(id, sess)
+	return m.adopt(ctx, id, sess)
 }
 
-// adopt 接管一个已打开的会话：登记并起扇出泵。
-func (m *Manager) adopt(id string, sess Session) error {
+// adopt 接管一个已打开的会话：等握手完成，再登记并起扇出泵。
+//
+// 必须等 Ready。`tmux -CC attach` 是个子进程：Attach 返回时进程刚 fork 出来，
+// tmux 服务端还没把这个 client 注册上。不等就返回，“接管成功”只是我们
+// map 里记了一笔，而 tmux 那边此刻还没有这条连接。后果不是测试红一个数字，
+// 而是紧跟着发的 resize / 按键落进握手的空窗里 —— 控制模式**不回放历史**，
+// 这些字节就永久丢了（面板启动对账后头一次打开会话时的尺寸错位就是这么来的）。
+//
+// 失败路径不会卡死：attach 直接失败时 Ready 也会关闭（见 terminal.Session），
+// 调用方随后从 Exited / 事件流分辨原因。
+func (m *Manager) adopt(ctx context.Context, id string, sess Session) error {
+	select {
+	case <-sess.Ready():
+	case <-ctx.Done():
+		_ = sess.Close()
+		return fmt.Errorf("等终端 %s 握手: %w", id, ctx.Err())
+	}
 	e := &entry{sess: sess, size: map[any]dim{}}
 	m.mu.Lock()
 	if _, dup := m.sess[id]; dup {
@@ -223,9 +242,13 @@ func (m *Manager) Reconcile(ctx context.Context) ([]string, error) {
 		}
 		sess, err := m.attFn(id)
 		if err != nil {
-			continue // 单个会话接不上不该拖垮整个启动流程
+			// 单个会话接不上不该拖垮整个启动流程；但要留话：静默跳过正是
+			// “侧栏列出了这个会话、点进去一片空白”的唯一成因。
+			logx.Info("接管终端会话 %s 失败: %v", id, err)
+			continue
 		}
-		if err := m.adopt(id, sess); err != nil {
+		if err := m.adopt(ctx, id, sess); err != nil {
+			logx.Info("接管终端会话 %s 失败: %v", id, err)
 			continue
 		}
 		out = append(out, id)
