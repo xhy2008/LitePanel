@@ -16,3 +16,4 @@ web/coverage/
 /asmprobe
 /logx.test
 *.test
+/litepanel
