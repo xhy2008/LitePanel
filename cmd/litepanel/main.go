@@ -84,7 +84,7 @@ func main() {
 	// 挂在 hub 上）。Bridge 必须在退出时 Close —— 否则面板停止时那些
 	// `tmux -CC attach` 子进程会留着（tmux 会话本身要活下去，这是 D5）。
 	tw := wireTerminal(db, hub)
-	deps.TermSessions = tw.Sessions
+	attachTerminalDeps(&deps, db, tw)
 	defer tw.Bridge.Close()
 
 	sub, err := webdist.Dist()

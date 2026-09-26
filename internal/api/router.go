@@ -50,6 +50,10 @@ type AuthDeps struct {
 	// TermSessions 为 nil 时终端会话接口返回 501（同上一条的理由：
 	// 200 + 空列表会被渲染成"服务器上没有任何终端会话"）。
 	TermSessions TermSessions
+
+	// Commands 为 nil 时快捷命令接口返回 501（同上：200 + 空列表会被渲染
+	// 成"没有任何快捷命令"，把"面板没接这个模块"说成"你还没添加过"）。
+	Commands Commands
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -103,6 +107,18 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Post("/term/sessions", authed(handleTermSessionsCreate(deps.TermSessions)))
 			a.Patch("/term/sessions/{id}", authed(handleTermSessionsRename(deps.TermSessions)))
 			a.Delete("/term/sessions/{id}", authed(handleTermSessionsDelete(deps.TermSessions)))
+		}
+		if deps.Commands != nil {
+			a.Get("/commands", authed(handleCommandsList(deps.Commands)))
+			a.Post("/commands", authed(handleCommandsCreate(deps.Commands)))
+			// /commands/busy 必须挂在 /commands/{id} 之前抢不到位置？chi 按
+			// 静态段优先匹配，这里显式分开写是为了让"路由被 /{id} 吃掉"
+			// 这种错在测试里立刻可见（busy 会被解成 id 非数字 → 400）。
+			a.Get("/commands/busy", authed(handleCommandsBusy(deps.Commands)))
+			a.Patch("/commands/{id}", authed(handleCommandsUpdate(deps.Commands)))
+			a.Delete("/commands/{id}", authed(handleCommandsDelete(deps.Commands)))
+			a.Post("/commands/{id}/move", authed(handleCommandsMove(deps.Commands)))
+			a.Post("/commands/{id}/run", authed(handleCommandsRun(deps.Commands)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。
