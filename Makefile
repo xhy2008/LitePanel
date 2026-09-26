@@ -11,7 +11,7 @@ $(WEB_STAMP): $(shell find web/src web/index.html web/package.json web/vite.conf
 bin:
 	mkdir -p bin
 
-.PHONY: all deps web build build-debug test test-go test-web lint install clean
+.PHONY: all deps web build build-debug test test-go test-web lint install clean smoke smoke-restart
 
 all: build
 
@@ -48,8 +48,15 @@ test-go:
 test-web:
 	cd web && $(NPM) run test
 
-lint:
-	cd web && $(NPM) run lint 2>/dev/null || true
+# 端到端冒烟：对着编译出来的二进制跑，验的是配置加载 → 路由装配 →
+# 静态资源 → tmux 桥接这条真实启动路径。Go 测试证不了这段（它自己 new 依赖）。
+# 前提：面板已在 PANEL_URL 上运行；密码在首次登录时由脚本自己改。
+smoke: build
+	go run tools/smoke/main.go "$${PANEL_PASS:?PANEL_PASS=一次性密码或改后的密码}"
+
+# D5 验收：kill -9 面板之后 tmux 会话必须还活着，重启后能认回来。
+smoke-restart: build
+	bash tools/smoke_restart.sh
 
 install: build
 	install -Dm755 bin/litepanel /usr/local/bin/litepanel
