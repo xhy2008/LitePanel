@@ -170,12 +170,105 @@ func TestCommandSortOrder(t *testing.T) {
 		t.Fatalf("创建顺序没保持: %v", names)
 	}
 
-	// 排到最前
-	if err := Move(db, items[2].ID, -100); err != nil {
-		t.Fatal(err)
+	// 上移两次到最前。
+	//
+	// 这里原先写的是 Move(id, -100) —— 一次挪一大步。那个契约本身就是错的
+	// （见 TestMoveSwapsWithNeighbor），因为按 delta 实现 ±1 时跨不过 10
+	// 的间隔。UI 上的上移键本来就是"与相邻那条换位置"，要置顶就按到底。
+	for i := 0; i < 2; i++ {
+		if err := Move(db, items[2].ID, "up"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	items, _ = List(db)
 	if items[0].Name != "三" {
-		t.Fatalf("Move 没生效: %s", items[0].Name)
+		t.Fatalf("上移两次没到最前: %s", items[0].Name)
+	}
+}
+
+// 上移/下移必须真的越过**相邻那一条**，而不是只把 sort 挪一点。
+//
+// sort 以 10 为间隔创建（为的是将来能往中间插），于是 sort±1 这类实现
+// 跨不过去：10 与 20 之间做 20-1=19，列表顺序一模一样。用户看到的是
+// "点上移，什么都不发生"，而且每一下都点得动、一次错都不报。
+// （实测输出：sort 从 20 变 19，顺序原地不动。）
+func TestMoveSwapsWithNeighbor(t *testing.T) {
+	db := openDB(t)
+	var ids []int64
+	for _, n := range []string{"第一", "第二", "第三"} {
+		c, err := Create(db, Command{Name: n, Command: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, c.ID)
+	}
+	want := func(wantNames ...string) {
+		t.Helper()
+		items, err := List(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, it := range items {
+			got = append(got, it.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(wantNames, ",") {
+			t.Fatalf("顺序应为 %v, got %v", wantNames, got)
+		}
+	}
+	want("第一", "第二", "第三")
+
+	if err := Move(db, ids[1], "up"); err != nil {
+		t.Fatal(err)
+	}
+	want("第二", "第一", "第三")
+
+	// down 用**另一条**来按，而不是把刚才那条移回去：后者在"up/down 走
+	// 了同一个分支"的实现上也会通过。
+	// 现状 [第二 第一 第三]，把"第一"下移 → 应与它下面的"第三"换。
+	if err := Move(db, ids[0], "down"); err != nil {
+		t.Fatal(err)
+	}
+	want("第二", "第三", "第一")
+
+	// 连续上移：每一步都要有效（"只换一次"的实现会在第二步停下）
+	if err := Move(db, ids[2], "up"); err != nil {
+		t.Fatal(err)
+	}
+	want("第三", "第二", "第一")
+	if err := Move(db, ids[1], "up"); err != nil {
+		t.Fatal(err)
+	}
+	want("第二", "第三", "第一")
+
+	// 已经在最前的那条再上移：顺序不变、不报错，更不能把它甩到末尾
+	if err := Move(db, ids[1], "up"); err != nil {
+		t.Fatalf("边界处再上移不该报错: %v", err)
+	}
+	want("第二", "第三", "第一")
+	// 已经在最后的那条再下移，同理
+	if err := Move(db, ids[0], "down"); err != nil {
+		t.Fatalf("边界处再下移不该报错: %v", err)
+	}
+	want("第二", "第三", "第一")
+}
+
+// 不存在的 id 上移必须报错：一条都改不动时静默成功会让前端以为挪好了。
+func TestMoveUnknownID(t *testing.T) {
+	db := openDB(t)
+	if err := Move(db, 9999, "up"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("应 ErrNotFound, got %v", err)
+	}
+}
+
+// 非法方向必须报错，而不是被当成"往下"。
+func TestMoveRejectsBadDir(t *testing.T) {
+	db := openDB(t)
+	c, err := Create(db, Command{Name: "x", Command: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Move(db, c.ID, "sideways"); err == nil {
+		t.Fatal("非法方向该报错")
 	}
 }
