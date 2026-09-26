@@ -233,6 +233,13 @@ func TestServiceCreateRollsBackWhenTmuxFails(t *testing.T) {
 	if _, err := exec.LookPath(DefaultBin); err != nil {
 		t.Skipf("没有 tmux: %v", err)
 	}
+	// 本测试的库是临时的、随用例销毁，但 **tmux 侧不是**：某些 tmux 版本
+	// 会退回 $HOME 而真的把会话建出来（下面就走那条 skip 分支）。必须清掉：
+	// 每个用例用的都是新库，第一个会话名总是 lp-1，泄漏一个 lp-1 就会让
+	// 后面任意一个建会话的用例撞上 duplicate session —— 那种失败看起来
+	// 与本用例毫无关系，只会让人从头查一遍。
+	// 名字可推算：这个库是新建的，Create 拿到 rowid 1 → lp-1。
+	t.Cleanup(func() { _ = KillSession(DefaultBin, TmuxName(1)) })
 	_, err := svc.Create(context.Background(), SessionInput{
 		Title: "建不成的", Cwd: "/definitely/not/a/real/directory/xyzzy",
 	})
@@ -334,4 +341,39 @@ func tmuxClientCount(t *testing.T, name string) int {
 		}
 	}
 	return n
+}
+
+// 删 id=2 的会话时，绝不能杀掉 lp-20。
+//
+// tmux 的 -t 只在"存在精确匹配"时优先精确；名字已经不存在、而恰好有个
+// 前缀邻居时，`kill-session -t lp-2` 就打到 lp-20 上。组合起来是完全可达
+// 的：库里的行还留着（用户直接在 tmux 里 exit 了会话），面板上点删除，
+// 于是删掉了另一个人的会话 —— 而且是不可逆的。
+//
+// 上层 Delete 会先 HasSession（精确）挡住这条路，但 KillSession 自己
+// 必须也是精确的：否则任何新调用点都自带这个坑。
+func TestKillSessionIsExactNotPrefix(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = ctx
+
+	neigh := TmuxName(20) // 与被杀名构成前缀关系：lp-2 vs lp-20
+	stale := TmuxName(2)
+	out, err := exec.Command(DefaultBin, "new-session", "-d", "-s", neigh).CombinedOutput()
+	if err != nil {
+		t.Fatalf("造邻居会话失败: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, neigh) })
+
+	// stale 从来没建过（正是"库里有、tmux 里没有"的那一步）
+	if err := KillSession(DefaultBin, stale); err == nil {
+		t.Log("KillSession 对不存在的目标报了成功（可接受），但绝不能顺手杀邻居")
+	}
+	live, err := HasSession(DefaultBin, neigh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live {
+		t.Fatalf("KillSession(%s) 误杀了前缀邻居 %s", stale, neigh)
+	}
 }

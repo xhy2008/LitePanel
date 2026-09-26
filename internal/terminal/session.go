@@ -528,8 +528,15 @@ func (s *Session) Close() error {
 }
 
 // KillSession 真的删掉 tmux 会话（只有面板里点「删除会话」才走这里）。
+//
+// "=名字" 不能省：tmux 的 -t 只在**存在精确匹配**时优先精确。名字已经不
+// 存在、而恰好有个前缀邻居时，`kill-session -t lp-2` 会打到 lp-20 上。
+// 这条组合完全可达：库里的行还在（用户直接在 tmux 里 exit 了会话），
+// 面板上点删除 —— 于是删掉了别人的会话，且不可逆。
+// 上层 Delete 靠 HasSession（同样精确）先挡一道，但这里也必须自守：
+// 否则任何新调用点都自带这个坑。
 func KillSession(bin, name string) error {
-	if out, err := exec.Command(bin, "kill-session", "-t", name).CombinedOutput(); err != nil {
+	if out, err := exec.Command(bin, "kill-session", "-t", "="+name).CombinedOutput(); err != nil {
 		return fmt.Errorf("kill-session %s: %v (%s)", name, err, bytes.TrimSpace(out))
 	}
 	return nil
