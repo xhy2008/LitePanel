@@ -197,3 +197,36 @@ func waitForPane(t *testing.T, name, want string) {
 	}
 	t.Fatalf("等前台命令变成 %q 超时（现在是 %q）", want, foregroundNow(t, name))
 }
+
+// 尸体不是空闲：pane_dead 必须读得出来。
+//
+// 实测（dev/hold）：send-keys 打进死 pane 返回退出码 0、什么都不发生
+// —— 注入器若把尸体判成"能投"，用户点完得到"注入成功"，命令却蒸发在
+// 空气里。PaneStateOf 对着尸体报的是 cmd=bash（shell 名字还挂在那儿），
+// 光看 Foreground==Shell 完全看不出来，只能靠 pane_dead。
+func TestPaneStateDeadCorpse(t *testing.T) {
+	skipNoTmux(t)
+	runTMUX(t, "new-session", "-d", "-s", "lp-299")
+	defer runTMUX(t, "kill-session", "-t", "lp-299")
+	runTMUX(t, "set-option", "-t", "lp-299", "remain-on-exit", "on")
+	typeprobe(t, "lp-299", "true")
+	runTMUX(t, "send-keys", "-t", "lp-299:.0", "exit 3", "Enter")
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if out := strings.TrimSpace(runTMUXQuiet(t, "list-panes", "-t", "=lp-299",
+			"-F", "#{pane_dead}")); strings.HasPrefix(out, "1") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	st, err := PaneStateOf(DefaultBin, "lp-299")
+	if err != nil {
+		t.Fatal(err) // 尸体读得到状态（不像消失会话那样报错）
+	}
+	if !st.Dead {
+		t.Fatalf("尸体必须标 Dead（cmd=%q 骗过了忙判定）: %+v", st.Foreground, st)
+	}
+	if st.Busy(probeQuiet, time.Now()) {
+		t.Log("尸体恰好也判忙（可接受），但 Dead 仍必须为真")
+	}
+}

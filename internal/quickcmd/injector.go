@@ -65,6 +65,12 @@ func (in *Injector) Run(ctx context.Context, c Command) (Result, error) {
 		if err != nil {
 			continue // 会话已经没了：List 与这里之间隔着一次用户点击的距离
 		}
+		// 死主 pane 的会话在 List 里仍可能 alive（别的 pane 活着），但
+		// send-keys 的目标 =name:0.0 是死的：实测回 exit 0、命令蒸发，
+		// 界面报 success 而屏幕一个字节都没变。忙不忙都轮不到它。
+		if st.Dead {
+			continue
+		}
 		if !st.Busy(in.quiet, in.now()) {
 			if err := injectTo(s.TmuxName, c); err != nil {
 				return Result{}, err
@@ -185,6 +191,10 @@ type BusyInfo struct {
 	Busy       bool   `json:"busy"`
 	Foreground string `json:"foreground"`
 	ShellName  string `json:"shell_name"`
+	// Dead：主 pane 是尸体。不把 dead 折算成 busy=true —— 标签写
+	// "忙"是谎报，用户会等一个永远不会来的"忙完"。dead 单独成字段，
+	// 前端把标签标成"已退出"；点进来 Run 会另开新会话并明说。
+	Dead bool `json:"dead"`
 }
 
 // Busy 给出一批会话现在能不能投。
@@ -224,6 +234,7 @@ func (in *Injector) Busy(ctx context.Context, ids []int64) (map[int64]BusyInfo, 
 			Busy:       st.Busy(in.quiet, now),
 			Foreground: st.Foreground,
 			ShellName:  st.ShellName,
+			Dead:       st.Dead,
 		}
 	}
 	if len(out) == 0 {

@@ -591,3 +591,52 @@ func (l *tmuxLog) Injections() []string {
 	}
 	return out
 }
+
+// 分屏会话里主 pane 是尸体：List 说会话活着（另一个 pane 确实活着），
+// 但注入目标 =name:0.0 是死的 —— send-keys 进死 pane 回 exit 0，
+// 命令蒸发（实测）。注入器必须在候选阶段就看 pane_dead，否则用户
+// 得到 success + 屏幕上一个字节都没变。
+func TestInjectSkipsSessionWithDeadMainPane(t *testing.T) {
+	in, svc := newInjector(t, DefaultBusyWindow)
+	ctx := context.Background()
+
+	meta, err := svc.Create(ctx, terminal.SessionInput{Title: "分屏尸"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := meta.TmuxName
+	trackSession(t, name)
+	// 先起一个活着的副 pane（sleep），再让主 pane 的 shell 退出：
+	// 副 pane 撑着会话不死，主 pane 留下尸体 —— 这才是真实里会出现
+	// 的常驻形态（用户在分屏里关掉一个 shell）。
+	// 顺序反过来不行：kill-pane / 最后一个 pane 死亡会带走整个会话，
+	// 那时连尸体都读不到（实测等待超时就是这个原因）。
+	run(t, name, "tmux split-window -t "+name+":0.0 'sleep 300'")
+	waitFor(t, "出现第二个 pane", func() bool {
+		out, _ := exec.Command(terminal.DefaultBin, "list-panes", "-t", name+":0",
+			"-F", "#{pane_index}").CombinedOutput()
+		return strings.Contains(string(out), "1")
+	})
+	run(t, name, "exit")
+	waitFor(t, "主 pane 变尸体", func() bool {
+		out, _ := exec.Command(terminal.DefaultBin, "list-panes", "-t", name+":0.0",
+			"-F", "#{pane_dead}").CombinedOutput()
+		return strings.TrimSpace(strings.Split(string(out), "\n")[0]) == "1"
+	})
+
+	// 必须等满静默窗口再投：split/exit 的回显本身就是"最近有输出"。
+	// 不等的话"跳过"是忙判定顺手带来的，把 Dead 判据删掉测试照样绿
+	// （假绿教训在 TestBusySessionCausesNewSession 里记过一次）。
+	time.Sleep(time.Duration(DefaultBusyWindow+2) * time.Second)
+	res, err := in.Run(ctx, Command{Name: "别投尸体", Command: "echo 不许蒸发"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsNewSession {
+		t.Fatalf("主 pane 已死，必须另开会话而不是投进死 pane: %+v", res)
+	}
+	// 死 pane 上不许出现注入的字节（capture 尸体是读得到的）
+	if strings.Contains(capture(t, name), "不许蒸发") {
+		t.Fatal("字节进了死 pane —— 界面报成功，命令蒸发")
+	}
+}

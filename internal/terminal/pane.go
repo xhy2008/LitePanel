@@ -22,6 +22,11 @@ type PaneState struct {
 	ShellName  string    // pane_pid 那个进程的名字，通常就是 bash/zsh
 	Foreground string    // tmux 眼里的前台命令名
 	LastOutput time.Time // 这个 window 最后一次有输出的时刻
+	// Dead：主 pane 是尸体（remain-on-exit 留下的）。死 pane 上
+	// Foreground 照旧报 shell 名（实测），光看忙判定会把它当空闲可投
+	// —— 而 send-keys 进死 pane 回 exit 0、命令蒸发，注入侧唯一安全
+	// 的判据是这个字段，忙不忙反而次要。
+	Dead bool
 }
 
 // Busy 判断现在往里注入会不会打断正在跑的东西。
@@ -57,7 +62,9 @@ func (s PaneState) Busy(quiet int, now time.Time) bool {
 //
 // 用 list-panes 而不是 display-message：后者拿不到退出码，会话不存在时
 // 只会打印一行错误文本，得靠匹配错误文案分辨"没有"和"问失败了"。
-const paneFormat = "#{pane_pid}\t#{pane_current_command}\t#{window_activity}"
+// pane_dead 是第四段：尸体上 pane_current_command 照旧报 shell 名
+// （实测），少这一段注入器就会对着尸体"注入成功"。
+const paneFormat = "#{pane_pid}\t#{pane_current_command}\t#{window_activity}\t#{pane_dead}"
 
 // PaneStateOf 读会话主 pane 的状态。会话不存在时返回 error（上层据此
 // 把它当"不在线"，而不是当成空闲 —— 后者会让注入对着空气成功）。
@@ -72,8 +79,10 @@ func PaneStateOf(bin, name string) (PaneState, error) {
 	// 注入的目标本来就是主 pane，用别的 pane 的状态替它作决定反而更糟。
 	line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0])
 	fields := strings.Split(line, "\t")
-	if len(fields) != 3 {
-		return PaneState{}, fmt.Errorf("读 pane 状态 %s: 解析不了 %q", name, line)
+	// 必须正好四段：段数不对就整行作废 —— 按位置取值时少一段会把
+	// activity 当 dead 解析，那是"给活会话报尸体"，方向同样错。
+	if len(fields) != 4 {
+		return PaneState{}, fmt.Errorf("读 pane 状态 %s: 字段数不对 %q", name, line)
 	}
 	st := PaneState{TmuxName: name, Foreground: strings.TrimSpace(fields[1])}
 	if pid, err := strconv.Atoi(fields[0]); err == nil && pid > 0 {
@@ -82,6 +91,7 @@ func PaneStateOf(bin, name string) (PaneState, error) {
 	if act, err := strconv.ParseInt(fields[2], 10, 64); err == nil && act > 0 {
 		st.LastOutput = time.Unix(act, 0)
 	}
+	st.Dead = strings.TrimSpace(fields[3]) == "1"
 	return st, nil
 }
 
