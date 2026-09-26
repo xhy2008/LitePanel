@@ -11,6 +11,7 @@ package terminal
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func makeCorpse(t *testing.T, name, exitCmd string) {
 	// 等 shell 真正就绪再送命令：new-session 返回时 shell 还在 fork，
 	// 早到的 send-keys 会打进虚空（这台板子上实测发生过）。
 	waitPrompt(t, name)
-	runTMUX(t, "send-keys", "-t", name, exitCmd, "Enter")
+	runTMUX(t, "send-keys", "-t", "="+name+":.0", exitCmd, "Enter")
 	// 等尸体出现而不是 sleep 赌运气：轮询 pane_dead。
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
@@ -57,7 +58,7 @@ func runTMUXQuiet(t *testing.T, args ...string) string {
 
 func waitPrompt(t *testing.T, name string) {
 	t.Helper()
-	runTMUX(t, "send-keys", "-t", name, "true", "Enter")
+	runTMUX(t, "send-keys", "-t", "="+name+":.0", "true", "Enter")
 	time.Sleep(300 * time.Millisecond)
 }
 
@@ -159,4 +160,30 @@ func TestListPaneStatusesNoServer(t *testing.T) {
 	if !errors.Is(err, ErrNoServer) {
 		t.Fatalf("没 server 要能被认出来（上层据此判「未知」），得 %v", err)
 	}
+}
+
+// CreateSession 必须自带 remain-on-exit —— 整条"退出码=死因"的规则
+// 依赖尸体存在。这条测试刻意不问 show-options（那只能证明"选项被设过"），
+// 而是走到底：真退出，然后要求尸体检得到。会话整个消失（没开选项时
+// 的行为）在这里会红。
+func TestCreateSessionLeavesCorpse(t *testing.T) {
+	tmuxReady(t)
+	name := fmt.Sprintf("lp-corpse-%d", time.Now().UnixNano())
+	s := mustCreate(t, name, SessionOpts{})
+	defer func() { _ = s.Close(); _ = KillSession(testBin, name) }()
+
+	waitPrompt(t, name)
+	runTMUX(t, "send-keys", "-t", "="+name+":.0", "exit 4", "Enter")
+
+	deadline := time.Now().Add(8 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		last = strings.TrimSpace(runTMUXQuiet(t, "list-panes", "-t", "="+name,
+			"-F", "#{pane_dead}|#{pane_dead_status}"))
+		if strings.HasPrefix(last, "1|") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("CreateSession 建的会话退出后没留下尸体（pane_dead=1 + 退出码），最后看到 %q", last)
 }

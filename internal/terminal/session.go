@@ -94,6 +94,13 @@ func CreateSession(bin, name string, o SessionOpts) (*Session, error) {
 	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("new-session %s: %v (%s)", name, err, bytes.TrimSpace(out))
 	}
+	// remain-on-exit：整条"退出码=死因"规则（见 death.go）的地基。
+	// 不开这个选项，shell 退出时连会话一起消失，"正常退出"和
+	// "被杀/重启"就永远分不出来 —— 实测三种死法的事件流一模一样。
+	// 失败不致命（会话已建起来）：顶多这个会话退出后按"异常消失"
+	// 保守处理，方向是对的。
+	_, _ = exec.Command(bin, "set-option", "-t", name,
+		"remain-on-exit", "on").CombinedOutput()
 	if o.HistoryLimit > 0 {
 		// 失败不致命：会话已建起来，限流没生效顶多历史短点
 		_, _ = exec.Command(bin, "set-option", "-t", name,

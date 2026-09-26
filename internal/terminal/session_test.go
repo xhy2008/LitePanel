@@ -216,18 +216,54 @@ func TestCloseKeepsTmuxSession(t *testing.T) {
 	}
 }
 
-// TestExitEventWhenShellQuits：会话里的 shell 退出要变成事件（%exit），
-// 前端要能看到「会话已结束」而不是永远转圈。
-func TestExitEventWhenShellQuits(t *testing.T) {
+// shell 退出的契约（2026-09 随"退出码=死因"裁决改版）。
+//
+// 旧契约是"shell 退出 → %exit → Exited"。启用 remain-on-exit 之后
+// 这条不再成立，而且**必须不成立**：会话退出后要留下带退出码的尸体
+// 供死因判定与遗言回放（实测探针 dev/hold：exit 之后连接保持、
+// capture 能读到遗言，随后 kill-session 才看到 %exit）。
+//
+// 所以"会话已结束"的观测通道换成了 pane_dead（ListPaneStatuses），
+// 连接断开只表示"会话真的没了"。这里把两头都钉住：退出≠断开、
+// 尸体上读得到遗言、kill 之后才断开。少了任何一头，前端要么对着
+// 尸体以为程序还在跑，要么删除会话后 WS 永远挂在半开连接上。
+func TestShellExitLeavesCorpseNotDisconnect(t *testing.T) {
 	tmuxReady(t)
 	s := newTestSession(t, SessionOpts{})
-	if err := s.SendText(context.Background(), "exit\n"); err != nil {
+	ctx := context.Background()
+	if err := s.SendText(ctx, "echo 遗言在此\n"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if err := s.SendText(ctx, "exit\n"); err != nil {
+		t.Fatal(err)
+	}
+	name := s.Name()
+	// 等尸体（真实 tmux 上的"会话已结束"信号）
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.HasPrefix(strings.TrimSpace(runTMUXQuiet(t,
+			"list-panes", "-t", "="+name, "-F", "#{pane_dead}")), "1") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	select {
+	case <-s.Exited():
+		t.Fatal("shell 退出（尸体还在）不该断开连接 —— 尸体要留着读遗言")
+	default:
+	}
+	txt, err := s.CaptureAll(ctx)
+	if err != nil || !strings.Contains(txt, "遗言在此") {
+		t.Fatalf("尸体上必须读得到遗言: err=%v text=%q", err, txt)
+	}
+	if err := KillSession(testBin, name); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-s.Exited():
 	case <-time.After(6 * time.Second):
-		t.Fatal("shell 退出后没有退出事件")
+		t.Fatal("会话真没了（kill）之后必须发退出事件")
 	}
 }
 
