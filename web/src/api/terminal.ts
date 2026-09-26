@@ -1,0 +1,35 @@
+// 与后端 internal/terminal/store.go 的 SessionMeta、internal/api/handlers_terminal.go
+// 一一对应。后端是 snake_case（Go struct tag），这里保持同名：HTTP 与 WS
+// 序列化的是同一个类型，前端自己改名就会与其中一条悄悄漂移。
+
+export interface TermSessionRow {
+  id: number;
+  tmux_name: string;
+  title: string;
+  cwd: string;
+  shell: string;
+  history_limit: number;
+  created_at: number;
+  last_attached_at: number;
+  // alive 由后端每次列表时问一次 tmux 得到。它不是"库里写着在"：
+  // 用户在 tmux 里自己 kill-session 之后，只有 tmux 知道会话没了。
+  alive: boolean;
+}
+
+export interface TermSessionInput {
+  title: string;
+  cwd?: string;
+  shell?: string;
+  history_limit?: number;
+}
+
+// 注意：后端目前**没有** term-events 频道，也没有任何形如
+// {id, alive} / {id, reload} 的推送。这里绝不提前声明一个不存在的事件类型
+// 让 store 去"处理"它 —— 那个处理器永远不会被调用，却会让人以为
+// 会话状态是实时推送的。会话列表的新鲜度靠 load()/reload() 显式刷新。
+
+export const HISTORY_LIMITS = [5000, 20000, 100000] as const;
+export const DEFAULT_HISTORY_LIMIT = 20000;
+
+export const termChannel = (id: number) => `term:${id}`;
+export const TERM_EVENTS_CHANNEL = 'term-events';
