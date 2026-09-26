@@ -553,10 +553,41 @@ func HasSession(bin, name string) (bool, error) {
 		return true, nil
 	}
 	msg := strings.TrimSpace(string(out))
-	if strings.Contains(msg, "no server running") || strings.Contains(msg, "can't find session") {
+	if noServerSays(msg) {
 		return false, nil
 	}
 	return false, fmt.Errorf("has-session %s: %v (%s)", name, err, msg)
+}
+
+// noServerSays 判断 tmux 的报错是否属于“根本没有 server / 根本没有会话”。
+//
+// 必须归到一起判，而不是到处散着 strings.Contains("no server running")：
+// tmux 在这几种情况下说的话完全不同，而它们都是合法状态，不是故障：
+//
+//   - server 起着、会话已被清空：       “no sessions”
+//   - server 起着、只查不到那个名字： “can't find session”
+//   - socket 都不存在（装着 tmux 但从没起过 server，全新机器/
+//     重启后的常态）：“error connecting to <path> (No such file or directory)”
+//
+// 最后一条本包原先不认，后果是面板第一次启动就是 500 —— 而那次启动
+// 恰恰是用户第一次打开面板（实测 tmux 3.7c）。真故障（权限不足、
+// socket 属主不对）不匹配这些文案，仍然会报错。
+func noServerSays(msg string) bool {
+	low := strings.ToLower(msg)
+	for _, s := range []string{
+		"no server running",
+		"no sessions",
+		"can't find session",
+	} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	// socket 不存在单独判：connect 失败会说 “error connecting to <path> (原因)”，
+	// 而括号里的原因才是关键。Permission denied 必须继续报错（那可能是别人
+	// 的 tmux server，把它当成“没会话”会谎报状态），只有 ENOENT 才是“没起过”。
+	return strings.Contains(low, "error connecting to") &&
+		strings.Contains(low, "no such file or directory")
 }
 
 // ListSessions 列出带指定前缀的会话名，供面板启动对账。
@@ -567,8 +598,7 @@ func ListSessions(bin, prefix string) ([]string, error) {
 	out, err := exec.Command(bin, "list-sessions", "-F", "#{session_name}").CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		// "no server running" 不是错误：没开过 tmux 的机器是合法状态
-		if strings.Contains(msg, "no server running") || strings.Contains(msg, "no sessions") {
+		if noServerSays(msg) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("list-sessions: %v (%s)", err, msg)

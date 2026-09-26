@@ -611,3 +611,37 @@ func waitPaneCommand(t *testing.T, name, want string, d time.Duration) {
 	}
 	t.Fatalf("前台程序没变成 %q（在等 %s）", want, d)
 }
+
+// 机器上装着 tmux、但 server 还没起过（全新机器、或机器重启后）时
+// 列会话必须回"没有会话"，不是报错。
+//
+// tmux 在这两种情况下说的话完全不同：
+//   - server 起着、会话被清空：  "no sessions"
+//   - socket 都不存在（从没起过）："error connecting to <path> (No such file
+//     or directory)"
+//
+// 只认前者的话，面板第一次启动就是 500 —— 而那次启动恰恰是用户第一次
+// 打开面板。实测 tmux 3.7c 给的是后者。
+func TestListSessionsWithoutServer(t *testing.T) {
+	tmuxReady(t)
+	dir := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", dir) // 私有空目录：那里必定没有 server
+
+	names, err := ListSessions(testBin, TmuxPrefix)
+	if err != nil {
+		t.Fatalf("没起过 server 该回空列表, got err=%v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("该回空列表, got %v", names)
+	}
+
+	// HasSession 同理：不能把"问不到"报成错误，否则删除路径上
+	// 一个不存在的会话会变成 500 而不是"已经没了"
+	live, err := HasSession(testBin, "lp-1")
+	if err != nil {
+		t.Fatalf("没起过 server 时 HasSession 该回 (false,nil), got err=%v", err)
+	}
+	if live {
+		t.Fatal("不可能有会话")
+	}
+}
