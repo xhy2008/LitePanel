@@ -41,6 +41,10 @@ interface State {
   // 没装 tmux 时后端返回 501。必须与"你还没有会话"区分开：
   // 后者会让用户一直去找那个根本不存在的新建按钮。
   unavailable: boolean;
+  // "会话 X 已退出"这类一次性提示，由壳层（App.vue）摆出来。
+  // 用 state 而不是 return 值：会话是在 load() 里消失的，而 load 的调用方
+  // 常常是轮询 —— 没人会去读一个后台轮询的返回值。
+  notice: string;
 }
 
 export const useTerminalStore = defineStore('terminal', {
@@ -52,6 +56,7 @@ export const useTerminalStore = defineStore('terminal', {
     creating: false,
     error: '',
     unavailable: false,
+    notice: '',
   }),
 
   getters: {
@@ -66,7 +71,22 @@ export const useTerminalStore = defineStore('terminal', {
       this.loading = true;
       try {
         const r = await api.get<{ sessions: TermSessionRow[] | null }>('/api/term/sessions');
-        this.sessions = r.sessions ?? [];
+        const all = r.sessions ?? [];
+        // 退出的会话不进标签栏（真机反馈：它们变成灰色标签挂在那儿，
+        // 用户要点进去才知道没了）。后端仍然保留 alive=0 的行 —— 那里是
+        // "这个会话曾经存在"的唯一记录，也是本条提示的依据。
+        const alive = all.filter((x) => x.alive);
+        // "刚刚还在"由跟上一次列表做差来保证，不需要额外的 loaded 标志位：
+        // 首次载入时 this.sessions 本来就是空表，差集自然是空 —— 库里那些
+        // 几小时前退出的历史行不会触发提示。（曾经加过 `if (this.loaded)`，
+        // 变异测试证明它是死代码：删掉它任何测试都不红。）
+        const gone = this.sessions.filter(
+          (p) => p.alive && !alive.some((x) => x.id === p.id),
+        );
+        if (gone.length) {
+          this.notice = `会话已退出：${gone.map((g) => g.title).join('、')}`;
+        }
+        this.sessions = alive;
         // 只在没有选中（或选中项已不存在）时落到第一个：会话切换是有状态的
         // （那个 shell 正在跑东西），不能被一次刷新抢走。
         if (!this.sessions.some((s) => s.id === this.activeId)) {
@@ -147,6 +167,10 @@ export const useTerminalStore = defineStore('terminal', {
       this.sessions = rest;
       if (this.activeId === id) this.activeId = rest[0]?.id ?? 0;
       this.error = '';
+    },
+
+    clearNotice() {
+      this.notice = '';
     },
 
     select(id: number) {

@@ -49,13 +49,12 @@ export function useTermRuntimes<R extends Runtime>(deps: RuntimeDeps<R>) {
         return;
       }
       // 删的是别的会话：不动现有实例（重建它等于把用户正在看的屏幕扔掉）。
-      // 唯一要补的情况是"当前根本没实例"—— 例如会话全死了之后又删掉
-      // 一个死会话，此时 activeId 指向的那个还是一片黑。
-    },
+      // 唯一要补的情况是"当前根本没实例"。
 
-    /** 会话在 tmux 侧退出：留着实例，用户会以为程序还在跑。 */
-    markDead(id: number) {
-      if (current?.id === id) drop();
+      // 这里不再有 markDead：会话在 tmux 侧退出时，store.load 会把它从
+      // sessions 里摘掉、activeId 落到下一个活会话，于是 focus(新 id)
+      // 在同一拍里就把旧实例 drop 了 —— 回收是切页的副产品，不需要
+      // 第二个入口。留着它等于留一条没人走、也证不了伪的路径。
     },
 
     get(id: number): R | undefined {

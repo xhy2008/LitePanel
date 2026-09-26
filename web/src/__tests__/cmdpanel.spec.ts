@@ -166,58 +166,53 @@ describe('执行（D20）', () => {
     expect(w.find('.run-confirm').exists()).toBe(true);
   });
 
-  it('自动新建会话时提示命令去了哪（否则终端上那行字凭空冒出来）', async () => {
+  // 提示的"显示"归壳层 toast（toast.spec.ts 覆盖），本组件的契约只到
+  // store.notice 为止：写对内容、别的什么都不做。之前这几条断言的是
+  // 面板自己渲染的 .toast —— 那份 toast 有个 onUnmounted 里的
+  // clearNotice，正好在跳转时把消息抹掉，是 bug 的一部分而不是特性。
+  // 提示的"显示"归壳层 toast（toast.spec.ts 覆盖：显示、自动消失、
+  // 同一句话第二次也要显示）。本组件的契约只到 store.notice：内容写对、
+  // 除此之外不多做。面板里那份本地 toast 已经在带一个 bug —— 它的
+  // onUnmounted 会 clearNotice，而点命令必然跳页、面板必然卸载，
+  // 于是消息在壳层看到之前就被抹掉了。
+  it('自动新建会话时把去了哪写进 notice（否则终端上那行字凭空冒出来）', async () => {
+    // 标题照后端真实的取法写：自动新建的会话叫「快捷命令 · <命令名>」，
+    // 所以提示里带上标题就等于带上了命令名。第一版我在这里断言提示里
+    // 要有命令名、而 fake 给的是 'lp-4'，红的是我自己的假数据不真实，
+    // 不是实现 —— 提示里再把命令名复述一遍只会变成
+    // "已新建会话 快捷命令 · 看盘 执行 看盘"。
     const w = await mountPanel({
-      run: { session_id: 4, is_new_session: true, title: 'lp-4' },
+      run: { session_id: 4, is_new_session: true, title: '快捷命令 · 看盘' },
       busy: { 1: { busy: true, foreground: 'apt' } },
     });
     useTerminalStore().sessions = [termRow(1), termRow(4)];
     await w.find('.cmd-tile').trigger('click');
     await flushPromises();
-    expect(w.find('.toast').text()).toContain('lp-4');
+    const qc = useQuickCmdStore();
+    expect(qc.notice).toContain('快捷命令 · 看盘');
+    expect(qc.notice).toContain('忙');
   });
 
-  // 提示说的事件已经过去（"已新建会话 lp-4"是刚才那一次的事）。
-  // 常驻不消失会被读成"当前状态"，于是下一次点之前它还在说上一轮的话。
-  // 用假计时器推进，不靠 sleep —— 真实延迟下这条测试会变成掷骰子。
-  it('提示会自己消失', async () => {
+  // 面板自己不渲染提示：两个消费者抢同一个 notice 字段，就会出现
+  // "谁先取走谁说了算"，而跳转路上先取走的那个恰恰会把它吃掉。
+  it('面板不渲染 toast（提示只有一个消费者：壳层）', async () => {
     const w = await mountPanel({
       run: { session_id: 1, is_new_session: true, title: 'lp-4' },
       busy: { 1: { busy: false } },
     });
     await w.find('.cmd-tile').trigger('click');
     await flushPromises();
-    expect(w.find('.toast').exists()).toBe(true);
-    vi.advanceTimersByTime(3000);
-    await flushPromises();
     expect(w.find('.toast').exists()).toBe(false);
+    expect(useQuickCmdStore().notice).not.toBe('');
   });
 
-  // 每次都一样的文案最容易踩空：notice 若不清空，值不变就不会再触发
-  // 显示逻辑，第二次点就没有任何提示 —— 而用户正因为看不见才连点。
-  it('同一条提示连续出现两次，两次都要弹出来', async () => {
-    const w = await mountPanel({
-      run: { session_id: 1, is_new_session: true, title: 'lp-4' },
-      busy: { 1: { busy: false } },
-    });
-    await w.find('.cmd-tile').trigger('click');
-    await flushPromises();
-    expect(w.find('.toast').exists()).toBe(true);
-    vi.advanceTimersByTime(3000);
-    await flushPromises();
-    expect(w.find('.toast').exists()).toBe(false);
-
-    await w.find('.cmd-tile').trigger('click');
-    await flushPromises();
-    expect(w.find('.toast').exists()).toBe(true);
-  });
-
-  it('执行失败时留在本页报错，不许跳到终端让用户以为成功了', async () => {
+  it('执行失败时留在本页，并把原因写进 notice', async () => {
     const w = await mountPanel({ runError: Object.assign(new Error('注入失败'), { code: 'tmux_error' }) });
     await w.find('.cmd-tile').trigger('click');
     await flushPromises();
+    // 不许跳到终端：那会让用户以为命令跑起来了。
     expect(router.currentRoute.value.name).toBe('quick');
-    expect(w.find('.toast').text()).toContain('注入失败');
+    expect(useQuickCmdStore().notice).toContain('注入失败');
   });
 });
 

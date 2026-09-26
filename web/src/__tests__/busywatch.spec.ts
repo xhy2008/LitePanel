@@ -17,17 +17,39 @@ afterEach(() => {
 });
 
 describe('useBusyWatch（终端页的忙闲轮询）', () => {
-  it('挂载立刻查一次，之后按间隔继续查', async () => {
-    const s = store();
-    const w = useBusyWatch(s as never, 2000);
+  // 会话列表必须跟着一起轮询：用户在终端里 exit 之后，标签要自己消失。
+  // "会话退出了"同样没有任何推送，不轮询就得靠手点刷新按钮。
+  // 顺序也定死：先列表后忙闲 —— 忙闲是按当前会话清单去问的，
+  // 先问忙闲就会拿着上一轮的会话名单去问（多问一个死的、漏问新建的）。
+  it('每一轮先重拉会话列表、再查忙闲', async () => {
+    const order: string[] = [];
+    const s = {
+      refreshBusy: vi.fn(async () => {
+        order.push('busy');
+      }),
+    };
+    const reload = vi.fn(async () => {
+      order.push('list');
+    });
+    const w = useBusyWatch(s as never, 2000, reload);
     w.start();
-    expect(s.refreshBusy).toHaveBeenCalledTimes(1);
-    // 每轮之间让微任务落地：上一轮没结掉就不发下一轮（防叠），而真实
-    // 网络里 3 秒足够一次请求落地。
-    await tick(w, 2000);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(order).toEqual(['list', 'busy', 'list', 'busy']);
+    w.stop();
+  });
+
+  // 列表拉失败（tmux 短暂不可用）不许把忙闲也带走：反过来也一样，
+  // 两件事各自失败、各自继续。
+  it('列表拉失败时忙闲照旧', async () => {
+    const s = { refreshBusy: vi.fn(async () => undefined) };
+    const reload = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const w = useBusyWatch(s as never, 2000, reload);
+    w.start();
+    await vi.advanceTimersByTimeAsync(2000);
     expect(s.refreshBusy).toHaveBeenCalledTimes(2);
-    await tick(w, 4000);
-    expect(s.refreshBusy).toHaveBeenCalledTimes(4);
+    expect(reload).toHaveBeenCalledTimes(2);
     w.stop();
   });
 

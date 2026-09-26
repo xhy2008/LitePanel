@@ -51,7 +51,9 @@ let tick: ReturnType<typeof setInterval> | null = null;
 // 忙闲轮询。"命令结束了"这件事不会推给任何人，不轮询就只能靠用户点标签
 // 去碰 —— 于是快捷命令跑完之后角标永久停在"忙"，下一次点命令就白开一个
 // 会话（实际踩到的就是这个）。
-const busyWatch = useBusyWatch(cmds);
+// 每一轮先重拉会话列表、再查忙闲：用户在 tmux 里 exit 之后标签要自己
+// 消失，而"会话退出了"同样没有任何推送。
+const busyWatch = useBusyWatch(cmds, undefined, () => store.reload());
 let offStatus: (() => void) | null = null;
 
 function setPane(id: number, el: unknown) {
@@ -138,29 +140,17 @@ const activeRow = computed(() => store.active);
 const offline = computed(() => wsStatus.value !== 'online');
 const suggestion = computed(() => autoTitle(form.value.title, store.sessions));
 
-// 当前会话（或它死了之后顶上的那一个）换了，就要有实例。
+// 当前会话换了，就要有实例。
+//
+// 这里不再判 alive：store.load 已经把退出的会话整个摘掉，activeRow 要么
+// 活着要么不存在。会话退出时的表现由那条路径负责 —— activeId 落到下一个
+// 活会话，下面的 watch 就会 focus(新 id)，旧实例在同一拍里被 drop。
 async function syncActive() {
   await nextTick();
-  const cur = activeRow.value;
-  if (!cur) {
-    runtimes.focus(0);
-    return;
-  }
-  if (!cur.alive) {
-    runtimes.markDead(cur.id);
-    return;
-  }
-  runtimes.focus(cur.id);
+  runtimes.focus(activeId.value || 0);
 }
 
 watch(activeId, syncActive);
-
-// 存活状态变了（reload 之后才看得出"已经在 tmux 里退出了"）：
-// 屏幕必须跟着回收，否则用户对着上一次的画面以为程序还在跑。
-watch(
-  () => store.sessions.map((s) => `${s.id}:${s.alive}`).join(','),
-  syncActive,
-);
 
 async function pick(id: number) {
   if (id === store.activeId) return;
@@ -268,10 +258,10 @@ onUnmounted(() => {
             v-for="s in store.sessions"
             :key="s.id"
             class="tab"
-            :class="{ on: s.id === store.activeId, dead: !s.alive }"
+            :class="{ on: s.id === store.activeId }"
             role="tab"
             :aria-selected="s.id === store.activeId"
-            :title="s.alive ? s.tmux_name : '会话已退出：点击查看当前状态'"
+            :title="s.tmux_name"
             @click="pick(s.id)"
           >
             <span class="dot" />
@@ -341,12 +331,9 @@ onUnmounted(() => {
           <p>{{ store.loading ? '载入中…' : '还没有终端会话' }}</p>
           <button class="go" :disabled="busy" @click="formOpen = true">新建会话</button>
         </div>
-        <div v-else-if="activeRow && !activeRow.alive" class="blank">
-          <p>会话「{{ activeRow.title }}」已退出。</p>
-          <button class="go" :disabled="busy" @click="createSession">
-            用同样的名字再开一个
-          </button>
-        </div>
+        <!-- 退出的会话不再留在标签栏里（store.load 把它们摘掉了）：
+             灰标签挂在那儿、要点进去才知道没了，比直接消失更让人困惑。
+             "为什么少了个标签"由 store.notice 说清楚。 -->
       </div>
     </template>
 
@@ -434,12 +421,6 @@ onUnmounted(() => {
 .tab.on {
   color: var(--text);
   border-color: var(--accent);
-}
-.tab.dead {
-  opacity: 0.55;
-}
-.tab.dead .dot {
-  background: var(--text-mute);
 }
 .dot {
   width: 6px;

@@ -11,7 +11,7 @@ export interface BusyPoller {
 // 再短就开始为了一个角标跟 tmux 抢 CPU，再长用户就会当成"卡住了"。
 export const BUSY_POLL_MS = 3000;
 
-export function useBusyWatch(store: BusyPoller, ms = BUSY_POLL_MS) {
+export function useBusyWatch(store: BusyPoller, ms = BUSY_POLL_MS, before?: () => Promise<unknown>) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   // 在飞的请求数。用它来防叠：慢网络下上一轮还没回来就发下一轮，
   // tmux 会被同一件事连续轰击。计数而不是布尔值，是因为 start() 会
@@ -31,6 +31,19 @@ export function useBusyWatch(store: BusyPoller, ms = BUSY_POLL_MS) {
     arm();
     if (inFlight > 0) return; // 上一轮还没回来，这一轮跳过
     inFlight++;
+    // 一轮 = 先重拉会话列表、再查忙闲。顺序写死：忙闲是按"当前会话清单"
+    // 问的，先问忙闲就会拿着上一轮的名单去问。列表失败不拦忙闲 ——
+    // 两件事各自失败、各自继续（tmux 抖一下不该让整个角标停摆）。
+    if (before) {
+      // 同步发起（不是 Promise.resolve().then(before)）：绕微任务会让
+      // 列表请求排到忙闲之后，于是这一轮拿着上一轮的会话名单去问忙闲
+      // —— 多问一个已退出的、漏问刚建的。
+      try {
+        Promise.resolve(before()).catch(() => undefined);
+      } catch {
+        /* 同上：列表失败不影响忙闲 */
+      }
+    }
     // 直接调、不要先挂一个 Promise.resolve().then()：绕那一圈会把发起
     // 推迟到微任务，"start 之后立刻查了一次"就再也保证不上了。
     // 一次失败（网络抖一下就够）不能把轮询链掐断，吞掉错误让下一轮继续。

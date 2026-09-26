@@ -66,12 +66,15 @@ describe('autoTitle', () => {
 });
 
 describe('terminal store：列表', () => {
+  // dead 行不进 sessions 是 2026-09 的改动（真机反馈：退出的标签挂在
+  // 标签栏上，要点进去才知道没了）。原来这条断言是 toEqual([7, 9])，
+  // 保护的是旧策略。
   it('load 填充 sessions 并把 active 指向第一个', async () => {
     const { store } = boot({
       get: vi.fn(async () => ({ sessions: [row({ id: 7 }), row({ id: 9, alive: false })] })),
     });
     await store.load();
-    expect(store.sessions.map((s) => s.id)).toEqual([7, 9]);
+    expect(store.sessions.map((s) => s.id)).toEqual([7]);
     expect(store.activeId).toBe(7);
     expect(store.loaded).toBe(true);
     expect(store.error).toBe('');
@@ -82,6 +85,28 @@ describe('terminal store：列表', () => {
     const { store } = boot({ get: vi.fn(async () => ({ sessions: null })) });
     await store.load();
     expect(store.sessions).toEqual([]);
+  });
+
+  // TerminalView 把 reload 当作轮询的 before 用：每一轮先重排"会话清单"，
+  // 再按新清单问 Busy。load 自己只记 error 不抛（否则别的调用方直接吃
+  // rejection），而轮询那一侧要求"这一轮失败下一轮照跑"—— reload 就是
+  // 这层壳。它容易被漏掉：漏了的话一次 500 就永久停表。
+  it('reload：失败被吞掉，已有列表原样留着', async () => {
+    let n = 0;
+    const { store } = boot({
+      get: async () => {
+        n++;
+        if (n === 1) return { sessions: [row()] };
+        throw Object.assign(new Error('boom'), { status: 500, code: 'tmux_error' });
+      },
+    });
+    await store.load();
+    await expect(store.reload()).resolves.toBeUndefined();
+    // 旧数据留着：清空的话，一次 500 就把整个标签栏抹成空面板，
+    // 看起来像"会话全没了"。
+    expect(store.sessions.map((x) => x.id)).toEqual([1]);
+    // error 由 load 负责记（那边有用例），这里只保证它没把 reload 变成抛错。
+    expect(store.error).not.toBe('');
   });
 
   it('load 失败时记下错误而不抛出', async () => {
@@ -202,8 +227,11 @@ describe('terminal store：外部变更', () => {
       get: vi.fn(async () => ({ sessions: [row({ id: 1, alive: false })] })),
     });
     store.sessions = [row({ id: 1, alive: true })];
+    store.loaded = true; // "刚刚还在"的前提是之前载入过
     await store.reload();
-    expect(store.sessions[0].alive).toBe(false);
+    // 不再是 alive=false 的灰标签，而是整个摘掉 + 说清楚为什么
+    expect(store.sessions).toEqual([]);
+    expect(store.notice).toContain('会话 1');
     expect(api.get).toHaveBeenCalled();
   });
 
@@ -236,5 +264,61 @@ describe('errorMessage', () => {
   });
   it('没有文案时给兜底', () => {
     expect(errorMessage(new Error(''))).not.toBe('');
+  });
+});
+
+// 会话在 tmux 里 exit 之后，标签必须自己消失（真机反馈）：之前它变成
+// 灰色的"已退出"标签挂在标签栏上，用户要一个个点进去才知道没了。
+//
+// 只在"这个标签刚刚还在"时提示一句。第一次进页面看见库里躺着的历史死行
+// 不提示 —— 那是几小时前退出的会话，弹一句"已退出"是在打扰。
+describe('terminal store：退出的会话自动摘掉', () => {
+  it('列表里没有 dead 标签，只留活着的', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({ sessions: [row({ id: 1 }), row({ id: 2, alive: false })] })),
+    });
+    await store.load();
+    expect(store.sessions.map((s) => s.id)).toEqual([1]);
+  });
+
+  // 用两轮 load 而不是手摆 state：真实场景就是轮询两轮之间少了一个标签，
+  // 手摆 state 会绕过 loaded 这个前提，测的就不是同一件事。
+  it('刚刚还在的标签消失了，提示是哪几个', async () => {
+    let round = 0;
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions:
+          round++ === 0
+            ? [row({ id: 1, title: '看盘' }), row({ id: 2, title: '跑任务' })]
+            : [row({ id: 1, title: '看盘' })],
+      })),
+    });
+    await store.load();
+    expect(store.notice).toBe(''); // 第一轮：谁都没少
+    await store.load();
+    expect(store.notice).toContain('跑任务');
+    expect(store.notice).not.toContain('看盘');
+  });
+
+  it('首次载入不提示（几小时前退出的会话不该弹提示）', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({ sessions: [row({ id: 2, alive: false })] })),
+    });
+    await store.load();
+    expect(store.notice).toBe('');
+    expect(store.sessions).toEqual([]);
+  });
+
+  // 正在看的会话退出：activeId 必须落到还活着的那个，不能停在一个
+  // 已经不存在的 id 上（那会让屏幕停在空白页，而别的标签其实是好的）。
+  it('当前会话退出后 active 落到活着的下一个', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({ sessions: [row({ id: 1 }), row({ id: 2, alive: false })] })),
+    });
+    store.sessions = [row({ id: 1 }), row({ id: 2 })];
+    store.loaded = true;
+    store.activeId = 2;
+    await store.load();
+    expect(store.activeId).toBe(1);
   });
 });

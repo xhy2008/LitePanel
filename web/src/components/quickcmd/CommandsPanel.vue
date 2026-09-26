@@ -22,46 +22,19 @@ const formFor = ref<number | 'new' | null>(null);
 const pendingRun = ref<CommandRow | null>(null);
 const pendingDelete = ref<CommandRow | null>(null);
 
-// toast 的文本。结果本身挂在 store.notice 上：磁贴点完就跳页，这个组件
-// 会被卸载，return 的值没有任何人会读，只能由下一个接手的人取走。
-// toast 必须自己消失：常驻的提示会被读成"当前状态"，而它说的其实是
-// "刚才新建过一个会话"。
-const toastMsg = ref('');
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
-
-function showToast(msg: string) {
-  if (!msg) return;
-  toastMsg.value = msg;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toastMsg.value = ''), 2600);
-}
-
+// 本组件不渲染 toast：notice 由壳层（App.vue）显示。
+//
+// 之前这里有一份本地 toast，而它带着一个 onUnmounted 里的 clearNotice() ——
+// 点命令会跳终端页，本组件在跳转中被卸载，那句 clearNotice 正好在壳层
+// 来得及显示之前把 notice 抹掉：命令执行成功、什么提示都没有。
+// 一个字段只能有一个消费者，否则就是这种互相抢。
 onMounted(async () => {
-  drainNotice();
   await store.load();
   // 会话列表可能还没加载过（用户直接进命令页）。忙闲是会话的属性，
   // 没有会话清单就无从问起。
   if (!term.loaded) await term.load();
   await store.refreshBusy();
 });
-
-onUnmounted(() => {
-  if (toastTimer) clearTimeout(toastTimer);
-  store.clearNotice();
-});
-
-// notice 是提示的唯一来源，显示后立刻清空。清空不是为了好看：
-// notice 的值不变就不会再触发 watch，于是"这条命令又去了一个新会话"
-// 这类每次都一样的文案，第二次点就没有任何提示了 —— 而用户正因为
-// 看不见才连点。挂载时也取一次：本次执行可能是在别的页触发的。
-function drainNotice() {
-  if (!store.notice) return;
-  showToast(store.notice);
-  store.clearNotice();
-}
-
-watch(() => store.notice, drainNotice);
-onMounted(drainNotice);
 
 function run(id: number) {
   const cmd = store.items.find((i) => i.id === id);
@@ -84,7 +57,7 @@ async function doRun(cmd: CommandRow) {
     // 已经点过确认了"这种随时会被写错的东西。
     await store.run(cmd, { goTerm: () => router.push({ name: 'term' }) });
   } catch {
-    // 失败原因由 store 写进 notice，下面的 watch 负责摆出来。
+    // 失败原因由 store 写进 notice，壳层的 toast 负责摆出来。
   }
   await store.refreshBusy();
 }
@@ -159,7 +132,6 @@ const editingRow = () =>
       </template>
     </Sheet>
 
-    <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>
   </div>
 </template>
 
@@ -202,19 +174,5 @@ const editingRow = () =>
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-}
-.toast {
-  position: fixed;
-  top: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 10px 20px;
-  background: rgba(20, 26, 33, 0.97);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  font-size: 12.5px;
-  z-index: 9999;
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
-  pointer-events: none;
 }
 </style>

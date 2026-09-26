@@ -109,13 +109,23 @@ describe('终端实例的保留与回收', () => {
     expect(() => rt.disposeAll()).not.toThrow();
   });
 
-  // 会话被外部杀掉（tmux 里 exit）之后还留着实例，用户点回那个标签
-  // 看到的仍是"上一次的画面"，以为程序还在跑。
-  it('markDead 回收该会话的实例', () => {
+  // 会话在 tmux 侧退出时实例必须被回收 —— 但入口不是专门的 markDead，
+  // 而是"activeId 落到下一个活会话"：store.load 摘掉死会话之后视图就会
+  // focus(新 id)，旧实例当拍 dispose。这里断言的就是那条路。
+  it('切到下一个会话时回收上一个实例（退出会话的回收路径）', () => {
     const f = fakeFactory();
     const rt = useTermRuntimes({ make: f.make });
     rt.focus(1);
-    rt.markDead(1);
+    rt.focus(2);
+    expect(f.made[0].disposed).toBe(true);
+    expect(rt.live()).toEqual([2]);
+  });
+
+  it('focus(0) 回收当前实例（会话全没了的情况）', () => {
+    const f = fakeFactory();
+    const rt = useTermRuntimes({ make: f.make });
+    rt.focus(1);
+    rt.focus(0);
     expect(f.made[0].disposed).toBe(true);
     expect(rt.live()).toEqual([]);
   });
