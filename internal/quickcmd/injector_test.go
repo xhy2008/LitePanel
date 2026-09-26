@@ -358,3 +358,117 @@ func TestCwdWithSpacesIsQuoted(t *testing.T) {
 		return err == nil
 	})
 }
+
+// 前端标"可投/忙"的判据必须与注入时用的判据是**同一份**。
+//
+// 如果 HTTP 层自己拿 PaneState 再判一次，quiet 窗口就有了第二个主人：
+// 设置页把窗口从 2 秒调到 10 秒，注入侧读配置、展示侧写死 2 秒，用户看到
+// 四个标签都显示"空闲"，点下去却每次都被另开一个新会话 —— 面板上没有任何
+// 一处报错，最容易被误判成"这功能坏了"。所以对外只暴露算好的结论。
+func TestInjectorBusySharesVerdictWithRun(t *testing.T) {
+	in, svc := newInjector(t, DefaultBusyWindow)
+	ctx := context.Background()
+
+	idle, err := svc.Create(ctx, terminal.SessionInput{Title: "空闲那个"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Delete(ctx, idle.ID)
+	busy, err := svc.Create(ctx, terminal.SessionInput{Title: "忙那个"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Delete(ctx, busy.ID)
+
+	run(t, busy.TmuxName, "sleep 40")
+	waitFor(t, "忙那个的前台变成 sleep", func() bool {
+		return foreground(t, busy.TmuxName) == "sleep"
+	})
+	// 等满静默窗口：两个会话刚刚都画过提示符/回显过命令，那本身就是输出。
+	// 不等的话"空闲"这条永远不成立，测的就只是"谁输出得更早"。
+	time.Sleep(time.Duration(DefaultBusyWindow+2) * time.Second)
+
+	states, err := in.Busy(ctx, []int64{idle.ID, busy.ID, 999999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("tmux 里查不到的会话不该编出状态来: %+v", states)
+	}
+	if states[idle.ID].Busy {
+		t.Errorf("空闲会话被判忙: %+v", states[idle.ID])
+	}
+	if !states[busy.ID].Busy {
+		t.Errorf("跑着 sleep 的会话该判忙: %+v", states[busy.ID])
+	}
+	// 展示字段：前端 tooltip 要写"前台是 sleep"，只给一个布尔没法解释
+	if states[busy.ID].Foreground == "" || states[busy.ID].Foreground == states[busy.ID].ShellName {
+		t.Errorf("foreground 该是真实前台命令: %+v", states[busy.ID])
+	}
+
+	// 同一批会话走 Run：必须挑中那个空闲的（这才叫同一份判据）
+	res, err := in.Run(ctx, Command{Name: "挑空闲", Command: "echo 挑中了"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Delete(ctx, res.SessionID)
+	if res.SessionID != idle.ID {
+		t.Fatalf("该投进空闲会话 id=%d, got %+v", idle.ID, res)
+	}
+}
+
+// 一个会话都问不到时报错，而不是回一张空表。
+//
+// 空表在 HTTP 层会画成"所有会话都空闲"，而真原因可能是 tmux 刚被关掉 ——
+// 用户会往空闲会话里投命令，然后什么都没发生。
+func TestInjectorBusyFailsWhenNothingAnswered(t *testing.T) {
+	in, _ := newInjector(t, DefaultBusyWindow)
+	if _, err := in.Busy(context.Background(), []int64{999998, 999997}); err == nil {
+		t.Fatal("一个会话都问不到时该报错，不能回空表")
+	}
+	// 空输入不报错也不查：页面刚打开、一个会话都没有是正常状态
+	states, err := in.Busy(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("空输入不该报错: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("空输入该回空表: %+v", states)
+	}
+}
+
+// 展示侧必须用**配置里的**窗口，不能自己拿一个常量。
+//
+// 上面那条只证明了"两处结论一致"，而两处都写死同一个常量时它照样绿 ——
+// 那正是设置页要改的那个值丢失的方式：用户在设置里把"判定忙的时间窗口"
+// 调到 30 秒，注入侧照 30 秒建新会话，标签却按 2 秒显示"空闲"，两边
+// 永远对不上，且没有任何一处报错。
+func TestBusyReflectsConfiguredWindow(t *testing.T) {
+	in, svc := newInjector(t, 30)
+	ctx := context.Background()
+
+	first, err := in.Run(ctx, Command{Name: "刚跑过", Command: "echo 刚跑完"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Delete(ctx, first.SessionID)
+	waitFor(t, "命令跑完", func() bool {
+		return strings.Contains(capture(t, terminal.TmuxName(first.SessionID)), "刚跑完")
+	})
+	// 越过默认窗口（2 秒）但仍在配置的 30 秒之内：
+	// 只有真的读 in.quiet，这里才会判忙。
+	time.Sleep(3 * time.Second)
+
+	states, err := in.Busy(ctx, []int64{first.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states[first.SessionID].Busy {
+		t.Fatalf("窗口配成 30 秒时，3 秒前刚有输出的会话该判忙: %+v", states)
+	}
+	// 同一会话在默认窗口下就是空闲 —— 证明上面那条红来自配置，
+	// 而不是"怎么问都忙"。
+	plain, _ := NewInjector(svc, DefaultBusyWindow).Busy(ctx, []int64{first.SessionID})
+	if plain[first.SessionID].Busy {
+		t.Fatalf("默认 2 秒窗口下该判空闲: %+v", plain)
+	}
+}

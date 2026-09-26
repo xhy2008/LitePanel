@@ -173,3 +173,61 @@ func waitPrompt(name string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// BusyInfo 是"这个会话现在能不能投"的结论。
+//
+// 为什么不直接把 terminal.PaneState 丢给上层：PaneState.Busy 是个需要
+// (quiet, now) 两个参数的**方法**，上层一旦拿到 PaneState 就得自己决定
+// 传什么 —— quiet 窗口于是有了第二个主人。设置页把窗口从 2 秒调到 10 秒，
+// 注入侧读配置、展示侧写死 2 秒，结果是四个标签都显示"空闲"而点下去每次
+// 都被另开新会话，面板上一处报错都没有。结论必须只算一次。
+type BusyInfo struct {
+	Busy       bool   `json:"busy"`
+	Foreground string `json:"foreground"`
+	ShellName  string `json:"shell_name"`
+}
+
+// Busy 给出一批会话现在能不能投。
+//
+// 判据与 Run 完全同源：同一个 quiet、同一个 now、同一个 PaneStateOf。
+// 前端据此把标签标成"可投/忙"，如果这里的窗口与 Run 用得不一致，标签
+// 说的和实际发生的就会相反（详见 BusyInfo）。
+//
+// 查不到的会话（库里活着但 tmux 里已 exit，或 id 本来就是编的）**跳过**，
+// 不编造状态：前端拿不到的标签就不标，比标错好。但一个都问不到时报错 ——
+// 空表会被画成"全都空闲"，而真原因可能是 tmux 刚被关掉，用户投进去的
+// 命令会对着空气"成功"。
+func (in *Injector) Busy(ctx context.Context, ids []int64) (map[int64]BusyInfo, error) {
+	out := make(map[int64]BusyInfo, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	want := make(map[int64]string, len(ids))
+	items, err := in.svc.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		for _, id := range ids {
+			if it.ID == id && it.Alive {
+				want[it.ID] = it.TmuxName
+			}
+		}
+	}
+	now := in.now()
+	for id, name := range want {
+		st, err := terminal.PaneStateOf(terminal.DefaultBin, name)
+		if err != nil {
+			continue // 刚被用户 exit：与 ids 里没有它等价
+		}
+		out[id] = BusyInfo{
+			Busy:       st.Busy(in.quiet, now),
+			Foreground: st.Foreground,
+			ShellName:  st.ShellName,
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("问不到任何会话的状态（tmux 不可用，或会话都已退出）")
+	}
+	return out, nil
+}
