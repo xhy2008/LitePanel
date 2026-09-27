@@ -30,21 +30,38 @@ var ErrBadPath = errors.New("路径不合法")
 //     AbsClean 会被 mkdir/rename 用在"末段还不存在"的路径上，直接
 //     EvalSymlinks 整条路径会在那里报 ENOENT，于是"新建文件"永远做不了。
 //
-// 解析符号链接不是为了圈禁，而是为了让操作落在用户眼睛看到的那个东西上：
-// 前端列出的是链接指向的目录内容，重命名/删除的对象也必须是它。
+// 解析符号链接不是为了圈禁，而是为了让路径落在用户眼睛看到的位置上。
+//
+// ⚠️ 具体语义按操作分两类，别搞混：
+//   - 把路径当**目录浏览**（List）或当**位置**用（Mkdir 的父链）时，
+//     需要的是解析后的真实位置 —— 用 AbsClean。
+//   - 把路径当**被操作的对象**（Stat/Rename，以及将来的 Delete）时，
+//     必须操作链接本身，末段不能解析 —— 用 SplitResolved。
+//     AbsClean 在这类路径上会把链接解析成目标，"重命名一个链接"就变成
+//     "搬走链接指向的文件"。
 func AbsClean(p string) (string, error) {
+	clean, err := cleanOnly(p)
+	if err != nil {
+		return "", err
+	}
+	return resolveExistingPrefix(clean)
+}
+
+// cleanOnly 只做校验 + Clean，**不解析任何符号链接**。
+//
+// 它是 SplitResolved 的地基：写入类操作要"末段原样、只解析中间层"，
+// 所以必须有一个能把"清洗"和"解析"分开的入口。少了这一层，
+// SplitResolved 只能先 AbsClean 整条路径 —— 那会把末段的符号链接也
+// 解析成目标，于是"重命名一个链接"实际把链接指向的文件搬走了
+// （ops_test.go 的 TestRenameSymlinkItself 就是这么抓到的）。
+func cleanOnly(p string) (string, error) {
 	if p == "" || strings.ContainsRune(p, 0) {
 		return "", fmt.Errorf("%w: %q", ErrBadPath, p)
 	}
 	if !filepath.IsAbs(p) {
 		return "", fmt.Errorf("%w: 必须是绝对路径 %q", ErrBadPath, p)
 	}
-	p = filepath.Clean(p)
-	resolved, err := resolveExistingPrefix(p)
-	if err != nil {
-		return "", err
-	}
-	return resolved, nil
+	return filepath.Clean(p), nil
 }
 
 // resolveExistingPrefix 从整条路径开始逐级往上退，第一个 EvalSymlinks

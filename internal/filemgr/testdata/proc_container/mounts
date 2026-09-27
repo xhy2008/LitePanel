@@ -1,0 +1,4 @@
+# 容器里没有一块"真实盘"：全是 overlay 与 bind mount
+overlay / overlay rw,relatime,lowerdir=/a,upperdir=/b 0 0
+tmpfs /tmp tmpfs rw,nosuid 0 0
+proc /proc proc rw,nosuid 0 0

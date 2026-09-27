@@ -39,9 +39,17 @@ const (
 // Entry 一个目录项。字段与前端一一对照，snake_case_tag 是 HTTP/WS
 // 共用的对外契约。
 type Entry struct {
-	Name  string `json:"name"`
+	Name string `json:"name"`
+	// Path 只在 /api/fs/stat 里填。列表条目不填：一页 500 条各自重复
+	// 同一个目录前缀，是白扔的字节；前端本来就知道自己在哪个目录。
+	Path  string `json:"path,omitempty"`
 	IsDir bool   `json:"is_dir"`
-	Size  int64  `json:"size"`
+	// IsSymlink 让前端给链接加角标。IsDir 对"指向目录的链接"是 false
+	// —— 它是链接，进去之后才是目录。双击仍然能进（AbsClean 会解析），
+	// 但界面必须让用户看出这是链接：指向别的分区的链接如果不标出来，
+	// 用户会以为自己还在当前分区里。
+	IsSymlink bool  `json:"is_symlink"`
+	Size      int64 `json:"size"`
 	// MTime unix 秒。不用 RFC3339：前端只拿它排序与显示相对时间，
 	// 秒在 12GB 机器的 JSON 体积上比完整时间戳小一半。
 	MTime int64 `json:"mtime"`
@@ -107,10 +115,12 @@ func List(ctx context.Context, dir string, opts ListOptions) (ListPage, error) {
 		if !opts.Hidden && strings.HasPrefix(name, ".") {
 			continue
 		}
-		// IsDir 取 readdir 的目录项类型：符号链接指向目录时它是 false。
-		// 资源管理器会把链接当链接显示（带角标），把"进去"留给双击 ——
-		// 跟着解析反而让用户看不出自己在哪。
-		r := row{name: name, isDir: de.IsDir(), key: foldKey(name)}
+		// IsDir/IsSymlink 取 readdir 的目录项_type_，一次系统调用都不多花：
+		// DirEntry.Type() 对符号链接返回 ModeSymlink，于是"指向目录的链接"
+		// 在这里是 IsDir=false / IsSymlink=true。不跟到目标是有意的（见
+		// Entry.IsSymlink）。
+		t := de.Type()
+		r := row{name: name, isDir: t.IsDir(), isLink: t&fs.ModeSymlink != 0, key: foldKey(name)}
 		if opts.Sort == SortType {
 			r.ext = extOf(name)
 		}
@@ -125,7 +135,7 @@ func List(ctx context.Context, dir string, opts ListOptions) (ListPage, error) {
 
 	// 全量排序键（size/mtime）必须在此刻 stat；名称/类型只 stat 本页。
 	if needsStat(opts.Sort) {
-		if err := statRows(ctx, full, rows); err != nil {
+		if err := lstatRows(ctx, full, rows); err != nil {
 			return ListPage{}, err
 		}
 		// stat 完再排：size/mtime 的值此刻才有
@@ -142,7 +152,7 @@ func List(ctx context.Context, dir string, opts ListOptions) (ListPage, error) {
 	}
 	pageRows := rows[lo:hi]
 	if !needsStat(opts.Sort) {
-		if err := statRows(ctx, full, pageRows); err != nil {
+		if err := lstatRows(ctx, full, pageRows); err != nil {
 			return ListPage{}, err
 		}
 	}
@@ -177,13 +187,21 @@ type row struct {
 	key   string
 	ext   string
 	isDir bool
-	size  int64
-	mtime time.Time
-	mode  fs.FileMode
+	// isLink 来自 readdir 的目录项类型，不额外起系统调用。
+	isLink bool
+	size   int64
+	mtime  time.Time
+	mode   fs.FileMode
 }
 
 func (r row) entry() Entry {
-	e := Entry{Name: r.name, IsDir: r.isDir, Size: r.size, Mode: r.mode.String()}
+	e := Entry{Name: r.name, IsDir: r.isDir, IsSymlink: r.isLink, Size: r.size, Mode: r.mode.String()}
+	if e.Mode == "" {
+		// 连 Lstat 都没成功的条目（readdir 之后被删）：拼一个目录项类型
+		// 给的最小心智形态，而不是空串 —— 前端的权限列直接显示这个串，
+		// 空串看起来像数据坏了。
+		e.Mode = "---------"
+	}
 	if !r.mtime.IsZero() {
 		e.MTime = r.mtime.Unix()
 	}
@@ -191,17 +209,27 @@ func (r row) entry() Entry {
 	return e
 }
 
-func statRows(ctx context.Context, dir string, rows []row) error {
+// statRows 用 **Lstat** 填 size/mtime/mode。
+//
+// 为什么不是 Stat：Stat 会跟随符号链接，于是链接条目的 size 报的是
+// **目标**的字节数 —— 用户按 size 排序时把一个 20 字节的链接当成它指向
+// 的 20GB 文件；mode 报目标的权限位，用户以为 chmod 改错了地方。
+// Lstat 报链接自身（size = 目标路径字符串长度，mode 以 L 开头），
+// 与 ls -l 的显示一致，也和 IsSymlink 自洽。
+//
+// 副作用是"悬空链接"在这里是**成功**的（Lstat 不碰目标），所以它的
+// size 是目标路径长度而不是 0。
+func lstatRows(ctx context.Context, dir string, rows []row) error {
 	for i := range rows {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fi, err := os.Stat(filepath.Join(dir, rows[i].name))
+		fi, err := os.Lstat(filepath.Join(dir, rows[i].name))
 		if err != nil {
-			// 单个条目 stat 失败绝不拖垮整页：列一半的目录比整页 500
-			// 有用。悬空符号链接也走这条路 —— readdir 看得见它、Stat
-			// 跟不到目标，于是它以 size=0 留在列表里：用户看得见它才
-			// 删得掉它。mode 退回目录项类型，size/mtime 保持零值。
+			// 单个条目失败绝不拖垮整页：列一半的目录比整页 500 有用。
+			// 走到这里通常意味着条目在 readdir 之后就被删了 —— 保留它在
+			// 列表里（size/mtime 为零值），用户看得见才删得掉、也才知道
+			// 列表不是最新的。
 			continue
 		}
 		rows[i].size = fi.Size()

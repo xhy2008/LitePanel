@@ -321,13 +321,19 @@ func TestListSurvivesEntryRace(t *testing.T) {
 		t.Fatalf("好条目必须都在: %v", got)
 	}
 	// 悬空符号链接本身：仍然要出现在列表里（它确实是目录里的一个条目，
-	// 用户要看得见它才能删它），size 记 0。
+	// 用户要看得见它才能删它）。
 	if !strings.Contains(got, "gone") {
 		t.Fatalf("悬空符号链接也必须列出: %v", got)
 	}
+	// 它的 size 是**链接自身**的长度（目标路径字符串的字节数），
+	// 不是 0，也不是"目标的大小"（目标不存在）。只有列条目用 Lstat
+	// 才有这个结果；Stat 会跟随链接、在悬空时整个失败。
 	for _, e := range p.Entries {
-		if e.Name == "gone" && e.Size != 0 {
-			t.Fatalf("悬空链接 size 记 0: %+v", e)
+		if e.Name != "gone" {
+			continue
+		}
+		if want := int64(len(filepath.Join(dir, "不存在"))); e.Size != want {
+			t.Fatalf("悬空链接 size 应为链接自身长度 %d: %+v", want, e)
 		}
 	}
 }
@@ -402,5 +408,108 @@ func TestListTiesAreStable(t *testing.T) {
 		if strings.Join(namesOf(again), ",") != strings.Join(namesOf(first), ",") {
 			t.Fatalf("同大小写名字的目录两次列举次序不同: %v vs %v", namesOf(again), namesOf(first))
 		}
+	}
+}
+
+// IsSymlink 是链接标记。只靠"悬空链接 size 看着不对"间接可见等于没有契约：
+// 正常链接（目标存在）也必须被标出来，否则用户看不出这是链接还是本体 ——
+// 双击"进入"一个指向别的分区的链接，会让他以为自己还在当前分区里。
+func TestListMarksSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "目标文件")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "链接到文件")); err != nil {
+		t.Skipf("本机不支持符号链接: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "不存在"), filepath.Join(dir, "悬空链接")); err != nil {
+		t.Fatal(err)
+	}
+	// 指向目录的链接：IsDir 必须是 false（它是链接，不是目录），
+	// IsSymlink 是 true。前端据此显示"链接"角标 + 目录图标。
+	linkDir := filepath.Join(dir, "链接到目录")
+	if err := os.Symlink(filepath.Join(dir, "真实目录"), linkDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "真实目录"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := List(context.Background(), dir, ListOptions{Sort: SortName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Entry{}
+	for _, e := range p.Entries {
+		byName[e.Name] = e
+	}
+	// 4 个链接/文件 + 被指向的真实目录本身 = 5 条
+	if len(byName) != 5 {
+		t.Fatalf("应列出 5 条: %v", namesOf(p))
+	}
+	// 真实目录自己是目录、不是链接 —— 把"指向目录的链接"和"目录本身"
+	// 搞混是 Stat/Lstat 用错的典型后果
+	if e := byName["真实目录"]; !e.IsDir || e.IsSymlink {
+		t.Errorf("真实目录应是目录且非链接: %+v", e)
+	}
+	// 指向目录的链接：is_dir=false（它是链接）・is_symlink=true
+	if e := byName["链接到目录"]; e.IsDir || !e.IsSymlink {
+		t.Errorf("指向目录的链接应 is_dir=false / is_symlink=true: %+v", e)
+	}
+	for _, n := range []string{"链接到文件", "悬空链接", "链接到目录"} {
+		if e, ok := byName[n]; !ok {
+			t.Fatalf("缺少 %s", n)
+		} else if !e.IsSymlink {
+			t.Errorf("%s 必须标 is_symlink: %+v", n, e)
+		}
+	}
+	if e := byName["目标文件"]; e.IsSymlink {
+		t.Errorf("普通文件不该标 is_symlink: %+v", e)
+	}
+	if e := byName["链接到文件"]; e.IsDir {
+		t.Errorf("链接不标 is_dir（前端按链接渲染）: %+v", e)
+	}
+	// 链接的 size 走 Lstat：报链接自身的长度，不是目标的。
+	// 报目标 size 会让用户按 size 排序时把一个 20 字节的链接当成
+	// 它指向的 20GB 文件。
+	if e := byName["链接到文件"]; e.Size != int64(len(target)) {
+		t.Errorf("链接 size 应为链接目标字符串长度 %d, got %d", len(target), e.Size)
+	}
+	if e := byName["目标文件"]; e.Size != 5 {
+		t.Errorf("普通文件 size: %+v", e)
+	}
+}
+
+// mode 也一样要走 Lstat：0777 lrwxrwxrwx 才是链接的真实权限位，
+// 跟着目标显示 0644 会让人以为改权限改错了地方。
+func TestListModeIsLinkOwn(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "f")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := filepath.Join(dir, "l")
+	if err := os.Symlink(f, l); err != nil {
+		t.Skipf("本机不支持符号链接: %v", err)
+	}
+	p, err := List(context.Background(), dir, ListOptions{Sort: SortName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modeL, modeF string
+	for _, e := range p.Entries {
+		switch e.Name {
+		case "l":
+			modeL = e.Mode
+		case "f":
+			modeF = e.Mode
+		}
+	}
+	if !strings.HasPrefix(modeL, "L") {
+		t.Errorf("链接 mode 应以 L 开头（os.ModeSymlink）: %q", modeL)
+	}
+	if !strings.HasPrefix(modeF, "-") {
+		t.Errorf("普通文件 mode 应以 - 开头: %q", modeF)
 	}
 }

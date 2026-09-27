@@ -1,0 +1,12 @@
+# 目标机实测（Ubuntu 26.04 / E5-2650v2）：SSD 根 + 机械盘 /DISK（全大写）
+/dev/nvme0n1p2 / ext4 rw,relatime 0 0
+/dev/nvme0n1p1 /boot/efi vfat rw,nodev 0 0
+/dev/sda1 /DISK ext4 rw,noatime 0 0
+/dev/sdb1 /home ext4 ro,noatime 0 0
+proc /proc proc rw,nosuid 0 0
+sysfs /sys sysfs rw,nosuid 0 0
+tmpfs /run tmpfs rw,nosuid,size=10% 0 0
+overlay /var/lib/docker/overlay2/x overlay rw,relatime 0 0
+/dev/loop3 /snap/core24/1234 squashfs ro,relatime 0 0
+none /sys/fs/pstore pstore rw,nosuid 0 0
+/dev/sda1 /mnt/disk-mirror ext4 rw,noatime 0 0
