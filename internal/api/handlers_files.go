@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -28,6 +29,7 @@ type Files interface {
 	Rename(ctx context.Context, from, to string) error
 	Roots(ctx context.Context) ([]filemgr.Root, error)
 	Open(ctx context.Context, path string) (filemgr.Opened, error)
+	Zip(ctx context.Context, paths []string, w io.Writer) error
 }
 
 // 编译期把"真家伙满足接口"钉住。没有这行，接口与 *filemgr.Service 的

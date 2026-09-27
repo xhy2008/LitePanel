@@ -1,10 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
 	"litepanel/internal/filemgr"
+	"litepanel/internal/logx"
 )
 
 // 下载（设计 8.3）。
@@ -33,9 +35,12 @@ func handleFSDownload(svc Files) http.HandlerFunc {
 		// 头必须在 ServeContent 之前设：它只在没写过头的情况下补默认值。
 		w.Header().Set("Content-Disposition", contentDisposition(f.Name))
 		w.Header().Set("Content-Type", downloadContentType(f.Name))
-		// Accept-Ranges 要显式给：客户端是在**发 Range 之前**决定要不要
-		// 续传的，等它发过来再告诉它就晚了（浏览器只会默默从头重下）。
-		w.Header().Set("Accept-Ranges", "bytes")
+		// Accept-Ranges 不在这里设：serveContent 在它自己那行的前一行为
+		// 所有 200/206 响应设好（GOROOT/src/net/http/fs.go 的
+		// `w.Header().Set("Accept-Ranges", "bytes")`）。曾经在这里显式
+		// 写过一次，理由写成"客户端发 Range 之前就得知道"—— 那个理由
+		// 站不住：能发 Range 的响应正是已经带了这个头的响应。显式那行
+		// 在 200 路径上是重复设同一个值，属于死代码，删。
 
 		// 传 f.Name 而不是空串：ServeContent 会用这个名字猜 Content-Type，
 		// 上面虽然已经设过，但让它保持一致也免于以后有人删掉上面那行时
@@ -116,4 +121,70 @@ func contentDisposition(name string) string {
 	// 空串则是非法头，所以绝不产生空（上面逐字节替换保证了这点）。
 
 	return "attachment; filename=\"" + fb.String() + "\"; filename*=UTF-8''" + ext.String()
+}
+
+// 打包下载（设计 8.3：多选→ zip 流，不落临时文件）。
+//
+// ?path= 可以重复多次，前端把选中的行原样传上来即可 —— URL 里放列表下标
+// 或 id 都需要前端与服务端同步"当前页"的状态，服务端无状态就没这个问题。
+
+func handleFSZip(svc Files) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		paths := r.URL.Query()["path"]
+		if len(paths) == 0 || (len(paths) == 1 && paths[0] == "") {
+			writeError(w, http.StatusBadRequest, "bad_path", "没有选中任何文件")
+			return
+		}
+		// 先逐个 Stat 再动笔。流式响应的头一旦写出就不能改，而"某个选中
+		// 路径不存在"恰恰是最常见的一种失败（列表是几秒前加载的，
+		// 期间别人删了它）。预检把这类可预见的失败挡在 200 之前，
+		// 剩下的中途失败（EIO、读不了的子目录）才只能靠"坏 zip = 失败"
+		// 兜底。多选常见几十项，Lstat 一次几百微秒，代价可以忽略。
+		for _, p := range paths {
+			if _, err := svc.Stat(r.Context(), p); err != nil {
+				writeFSError(w, err)
+				return
+			}
+		}
+
+		// 下载名：多选时叫"多项 (N 项).zip"不如叫第一项 + "等 N 个"，
+		// 用户是从某一行点的下载，那个名字是他唯一认得的锚点
+		name := zipName(paths)
+		w.Header().Set("Content-Disposition", contentDisposition(name))
+		// application/zip 是登记过的媒体类型（RFC 9110 时代的
+		// application/octet-stream 兜底会丢掉"这就是个压缩包"的信息，
+		// 浏览器于是按扩展名猜，扩展名又被某些 WebView 忽略）
+		w.Header().Set("Content-Type", "application/zip")
+
+		// **不设 Content-Length**：流式打包的长度在结束前未知。手动设一个
+		// 猜测值的话，Go 会按它截断或挂起，客户端得到一个坏 zip。
+		// 分块传输是这里唯一诚实的选。
+		if err := svc.Zip(r.Context(), paths, w); err != nil {
+			// 头此时大概率已经发出去了（zip 的头几个字节就是响应体的开头），
+			// **没有**"改成 500"这条路。唯一有用的动作是停止写流：
+			// 客户端拿到的是缺中央目录的 zip，任何解压端都会判失败 ——
+			// 失败但响亮，胜过悄悄少几个文件。
+			logx.Info("zip 打包中断: %v", err)
+			return
+		}
+	}
+}
+
+func zipName(paths []string) string {
+	base := paths[0]
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "" {
+		base = "下载"
+	}
+	if len(paths) == 1 {
+		// 单文件打包也走这里：前端的多选框只勾中一个时发的就是 zip 请求，
+		// 名字里丢掉扩展名会让它下完变成"无类型文件"
+		if !strings.HasSuffix(strings.ToLower(base), ".zip") {
+			base += ".zip"
+		}
+		return base
+	}
+	return base + fmt.Sprintf(" 等%d项.zip", len(paths))
 }

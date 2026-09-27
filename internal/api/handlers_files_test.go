@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"litepanel/internal/api"
 	"litepanel/internal/filemgr"
@@ -593,6 +596,7 @@ func (s stubFiles) Roots(context.Context) ([]filemgr.Root, error) { return nil, 
 func (s stubFiles) Open(context.Context, string) (filemgr.Opened, error) {
 	return filemgr.Opened{}, s.err
 }
+func (s stubFiles) Zip(context.Context, []string, io.Writer) error { return s.err }
 
 // 未知错误必须是 500，不能图省事归成 400。
 //
@@ -704,6 +708,27 @@ func TestFSDownloadFilenameRFC5987(t *testing.T) {
 		if strings.Contains(star, `"`) {
 			t.Errorf("%q 的 filename* 含裸引号: %q", name, star)
 		}
+		// ASCII 回退名同样不能有引号/反斜杠/CR/LF：它是**未编码**地写进
+		// 头里的，一个含引号的文件名就能提前闭合引号往响应头里塞东西
+		// （响应头注入）。这条比 filename* 更容易漏，因为那部分看起来
+		// "只是个给人看的回退名"。
+		// 回退名的取法**不能按第一个引号截断** —— 那样实现真的把引号
+		// 漏进回退名时，测试会先被同一个引号截断、永远看不到它，
+		// 断言于是恒真（这是本文件第二次踩"自证式断言"）。
+		// 正确做法是按两个字段之间的分隔符取段。
+		if j := strings.Index(cd, "filename=\""); j >= 0 {
+			ascii := cd[j+len("filename=\""):]
+			if k := strings.Index(ascii, "\"; filename*="); k >= 0 {
+				ascii = ascii[:k]
+			} else {
+				ascii = strings.TrimSuffix(ascii, "\"")
+			}
+			for _, bad := range []string{`"`, "\\", "\r", "\n", ";"} {
+				if strings.Contains(ascii, bad) {
+					t.Errorf("%q 的 ASCII 回退名含 %q: %q", name, bad, ascii)
+				}
+			}
+		}
 		// 空格与 % 也要转义（% 不转义会与真实百分号编码混淆，出现 %25 / % 混排）
 		if strings.Contains(star, " ") {
 			t.Errorf("filename* 含裸空格: %q", star)
@@ -760,7 +785,9 @@ func TestFSDownloadRange(t *testing.T) {
 		t.Errorf("Content-Range = %q", cr)
 	}
 	// 必须带 Accept-Ranges：没有它，客户端不知道这个端点支持续传，
-	// 断线后只能从头再来（对 4GB 的备份文件就是灾难）
+	// 断线后只能从头再来（对 4GB 的备份文件就是灾难）。
+	// 断言的是**可观察契约**而不是"我们自己有没有写这个头"：值由
+	// http.ServeContent 提供也照样满足要求，换成任何实现都一样要过。
 	res2 := h.download("/api/fs/download?path="+qs(p), nil)
 	if ar := res2.Header.Get("Accept-Ranges"); ar != "bytes" {
 		t.Errorf("Accept-Ranges = %q", ar)
@@ -799,5 +826,176 @@ func TestFSDownloadErrors(t *testing.T) {
 			continue
 		}
 		assertErrorCode(t, res, strings.TrimSpace(c.code))
+	}
+}
+
+// ---------- 打包下载（zip）----------
+
+// zipHarness 起**真实**的 HTTP 服务器。
+//
+// httptest.NewRecorder 会把响应整个缓冲进内存，用它永远测不出"边压边发"
+// 是不是真的在流式 —— 一个把 zip 全攒在内存里再写出的实现，在 Recorder
+// 下与真流式实现的表现完全一致。这里要验的恰恰是"没有整包缓冲"，
+// 所以必须用真连接（见 TestFSZipStreamsWhilePackable）。
+func zipHarness(t *testing.T) (*filesHarness, string) {
+	t.Helper()
+	h := setUpFiles(t)
+	srv := httptest.NewServer(h.handler)
+	t.Cleanup(srv.Close)
+	return h, srv.URL
+}
+
+func zipGet(t *testing.T, url, token, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("GET", url+"/api/fs/zip?"+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: token})
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestFSZipMultiSelect(t *testing.T) {
+	h, url := zipHarness(t)
+	writeFile(t, filepath.Join(h.root, "a.txt"), "A")
+	writeFile(t, filepath.Join(h.root, "子目录", "b.txt"), "B")
+
+	res := zipGet(t, url, h.token, "path="+qs(filepath.Join(h.root, "a.txt"))+
+		"&path="+qs(filepath.Join(h.root, "子目录")))
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d body=%s", res.StatusCode, b)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/zip") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if cd := res.Header.Get("Content-Disposition"); !strings.Contains(cd, ".zip") {
+		t.Errorf("打包下载的下载名必须带 .zip, got %q", cd)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("zip 坏: %v", err)
+	}
+	var names []string
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+	got := strings.Join(names, "|")
+	if !strings.Contains(got, "a.txt") || !strings.Contains(got, "子目录/b.txt") {
+		t.Errorf("条目 = %s", got)
+	}
+}
+
+// 空选择必须 400。给一个 0 文件的 zip 的话，下载器判"成功"，
+// 用户盯着空压缩包怀疑自己点错了，而面板这边什么都没记。
+func TestFSZipEmptySelection(t *testing.T) {
+	_, url := zipHarness(t)
+	res := zipGet(t, url, "", "x=1")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("未登录应 401, got %d", res.StatusCode)
+		return
+	}
+}
+
+func TestFSZipNeedsAuth(t *testing.T) {
+	_, url := zipHarness(t)
+	res := zipGet(t, url, "", "path=/etc")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("应 401, got %d", res.StatusCode)
+	}
+}
+
+// 慢打包的替身：写一段就卡住，等测试把它放行。
+type slowZipFiles struct {
+	stubFiles
+	started chan []byte // 第一次 Write 时把已写出的字节交给测试
+	release chan struct{}
+}
+
+func (s *slowZipFiles) Zip(ctx context.Context, paths []string, w io.Writer) error {
+	// archive/zip 的写缓冲是 4KB 量级；一次写 64KB 才能保证有字节
+	// 真的穿过 net/http 自己的写缓冲到达客户端，而不只是"进了缓冲区"
+	buf := make([]byte, 64*1024)
+	if _, err := w.Write(buf); err != nil {
+		return err
+	}
+	s.started <- buf
+	<-s.release
+	return nil
+}
+
+// 打包必须是流式的 —— 这条**测不出来就等于没实现**。
+//
+// 设计 8.3 明写"不落临时文件"：勾选下载常常是几十 GB 的日志目录，
+// 先在内存/磁盘攒一份等于把用户的盘吃空，而失败时那坨临时文件没人清。
+// 问题是 Recorder 与"全攒完再发"的实现在断言上无法区分，所以这里
+// 用真服务器 + 一个写一段就卡住的 Zip 实现：客户端能在放行之前读到
+// 字节，才证明中间没有任何整包缓冲。
+func TestFSZipStreamsWhilePacking(t *testing.T) {
+	slow := &slowZipFiles{started: make(chan []byte, 1), release: make(chan struct{})}
+	h := newHarnessWith(t, func(d *api.AuthDeps) { d.Files = slow })
+	srv := httptest.NewServer(h.handler)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/fs/zip?path=/whatever", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: h.token})
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 还没放行就能读到字节
+	deadline := time.After(3 * time.Second)
+	got := make(chan int, 1)
+	go func() {
+		b := make([]byte, 4096)
+		n, _ := res.Body.Read(b)
+		got <- n
+	}()
+	select {
+	case n := <-got:
+		if n <= 0 {
+			t.Fatal("流式响应读到 0 字节")
+		}
+	case <-deadline:
+		t.Fatal("打包还没结束就读不到字节：响应被整体缓冲了")
+	}
+	// 整体缓冲的另一个指纹：Content-Length。流式响应的长度在打包结束前
+	// 根本未知，只能分块传输
+	if cl := res.Header.Get("Content-Length"); cl != "" {
+		t.Errorf("流式响应不该有 Content-Length=%q", cl)
+	}
+	close(slow.release)
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+}
+
+func TestFSZipErrors(t *testing.T) {
+	h := setUpFiles(t)
+	dir := filepath.Join(h.root, "子目录")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		q, code string
+		status  int
+	}{
+		// 空选择：给一个 0 文件的 zip 会被下载器判"成功"，
+		// 用户盯着空包怀疑自己点错了，而面板这边什么都没记
+		{"/api/fs/zip", "bad_path", http.StatusBadRequest},
+		{"/api/fs/zip?path=", "bad_path", http.StatusBadRequest},
+		{"/api/fs/zip?path=" + qs(filepath.Join(h.root, "没有")), "not_found", http.StatusNotFound},
+	}
+	for _, c := range cases {
+		res := h.download(c.q, nil)
+		if res.StatusCode != c.status {
+			t.Errorf("%s 应 %d, got %d", c.q, c.status, res.StatusCode)
+			continue
+		}
+		assertErrorCode(t, res, c.code)
 	}
 }
