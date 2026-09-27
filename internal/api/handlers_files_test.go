@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -589,6 +590,9 @@ func (s stubFiles) Rename(context.Context, string, string) error {
 	return s.err
 }
 func (s stubFiles) Roots(context.Context) ([]filemgr.Root, error) { return nil, s.err }
+func (s stubFiles) Open(context.Context, string) (filemgr.Opened, error) {
+	return filemgr.Opened{}, s.err
+}
 
 // 未知错误必须是 500，不能图省事归成 400。
 //
@@ -626,5 +630,174 @@ func TestFSUnknownErrorIs500(t *testing.T) {
 		if !strings.Contains(string(raw), "Input/output error") {
 			t.Errorf("%s %s detail 丢了原始错误: %s", c.method, c.path, raw)
 		}
+	}
+}
+
+// ---------- 下载（设计 8.3）----------
+
+func (f *filesHarness) download(q string, headers map[string]string) *http.Response {
+	f.t.Helper()
+	req := httptest.NewRequest("GET", q, nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: f.token})
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func TestFSDownloadStreamsFile(t *testing.T) {
+	h := setUpFiles(t)
+	p := filepath.Join(h.root, "报告 2026.txt")
+	writeFile(t, p, "中文内容 abc")
+
+	res := h.download("/api/fs/download?path="+qs(p), nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if string(body) != "中文内容 abc" {
+		t.Fatalf("body = %q", body)
+	}
+	// Content-Length 必须等于**字节**数。填成字符数的话浏览器收满 12 字节
+	// 就认为完成，得到一个被截断的文件，而面板侧完全无感
+	if cl := res.Header.Get("Content-Length"); cl != "16" {
+		t.Errorf("Content-Length = %q, 期望 16 字节", cl)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if res.Header.Get("Last-Modified") == "" {
+		t.Error("缺 Last-Modified：浏览器无法做条件请求，重下整站文件时浪费流量")
+	}
+	if cd := res.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, 必须是 attachment（否则浏览器直接渲染）", cd)
+	}
+}
+
+// 中文文件名必须走 RFC 5987。
+//
+// 这不是国际化洁癖：HTTP 头按 Latin-1 解释，直接把 UTF-8 塞进
+// filename="报告.txt"，Chrome 会按 Windows-1252 解码成"æ¥åå.txt"
+// 一类的乱码 —— 用户下载 50 个中文命名的备份文件，得到 50 个乱码文件，
+// 而他无从判断哪个文件对应哪个。filename*=UTF-8 加百分号编码才是唯一正确的写法。
+func TestFSDownloadFilenameRFC5987(t *testing.T) {
+	h := setUpFiles(t)
+	for _, name := range []string{"报告 2026.txt", "a b.txt", "引号\"号.txt", "换\n行.txt", "日曜%日.txt"} {
+		p := filepath.Join(h.root, name)
+		writeFile(t, p, "x")
+		res := h.download("/api/fs/download?path="+qs(p), nil)
+		cd := res.Header.Get("Content-Disposition")
+		if !strings.Contains(cd, "filename*=UTF-8''") {
+			t.Errorf("%q 缺 RFC 5987 段: %q", name, cd)
+			continue
+		}
+		// 反斜杠、引号、CR/LF 必须被百分号编码掉，否则一个含引号的文件名
+		// 就能提前闭合引号往响应头里塞东西（响应头注入）
+		star := cd[strings.Index(cd, "filename*="):]
+		for _, bad := range []string{"\n", "\r", "%22"} {
+			if strings.Contains(star, bad) && bad != "%22" {
+				t.Errorf("%q 的 filename* 含裸 %q: %q", name, bad, star)
+			}
+		}
+		if strings.Contains(star, `"`) {
+			t.Errorf("%q 的 filename* 含裸引号: %q", name, star)
+		}
+		// 空格与 % 也要转义（% 不转义会与真实百分号编码混淆，出现 %25 / % 混排）
+		if strings.Contains(star, " ") {
+			t.Errorf("filename* 含裸空格: %q", star)
+		}
+	}
+}
+
+// ASCII 回退名：老的下载工具/终端里的 curl 不认 filename*=，
+// 只认 filename=。没有回退时它们会把文件存成 "download" 或整段乱码。
+func TestFSDownloadASCIIFallback(t *testing.T) {
+	h := setUpFiles(t)
+	p := filepath.Join(h.root, "报告.txt")
+	writeFile(t, p, "x")
+	res := h.download("/api/fs/download?path="+qs(p), nil)
+	cd := res.Header.Get("Content-Disposition")
+	// filename= 段必须是纯 ASCII 且非空
+	i := strings.Index(cd, "filename=")
+	if i < 0 {
+		t.Fatalf("缺 ASCII 回退名: %q", cd)
+	}
+	fi := cd[i+len("filename="):]
+	if j := strings.IndexByte(fi, ';'); j >= 0 {
+		fi = fi[:j]
+	}
+	fi = strings.Trim(strings.TrimSpace(fi), `"`)
+	if fi == "" {
+		t.Fatalf("ASCII 回退名为空: %q", cd)
+	}
+	for _, r := range fi {
+		if r > 127 {
+			t.Errorf("ASCII 回退名含非 ASCII %q: %q", r, fi)
+			break
+		}
+	}
+}
+
+func TestFSDownloadRange(t *testing.T) {
+	h := setUpFiles(t)
+	p := filepath.Join(h.root, "big.bin")
+	writeFile(t, p, "0123456789")
+
+	// 断点续传：下载管理器、浏览器"重试"、以及手机切后台恢复，发的都是
+	// Range。忽略它而回 200 全量的话，客户端会把 10 字节追加到已有的
+	// 5 字节后面，得到一个 15 字节的坏文件 —— 而且没有任何报错。
+	res := h.download("/api/fs/download?path="+qs(p), map[string]string{"Range": "bytes=5-9"})
+	if res.StatusCode != http.StatusPartialContent {
+		t.Fatalf("Range 请求应 206, got %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if string(body) != "56789" {
+		t.Errorf("Range 内容 = %q", body)
+	}
+	if cr := res.Header.Get("Content-Range"); cr != "bytes 5-9/10" {
+		t.Errorf("Content-Range = %q", cr)
+	}
+	// 必须带 Accept-Ranges：没有它，客户端不知道这个端点支持续传，
+	// 断线后只能从头再来（对 4GB 的备份文件就是灾难）
+	res2 := h.download("/api/fs/download?path="+qs(p), nil)
+	if ar := res2.Header.Get("Accept-Ranges"); ar != "bytes" {
+		t.Errorf("Accept-Ranges = %q", ar)
+	}
+	// 越界的 Range 必须 416。回 200 会被解读成"整文件重发"，
+	// 回 200 + 空体则会产生一个 0 字节的"下载成功"文件
+	res3 := h.download("/api/fs/download?path="+qs(p), map[string]string{"Range": "bytes=99-"})
+	if res3.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("越界 Range 应 416, got %d", res3.StatusCode)
+	}
+}
+
+func TestFSDownloadErrors(t *testing.T) {
+	h := setUpFiles(t)
+	sub := filepath.Join(h.root, "子目录")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		q, code string
+		status  int
+	}{
+		{"/api/fs/download", "bad_path", http.StatusBadRequest},
+		{"/api/fs/download?path=相对", "bad_path", http.StatusBadRequest},
+		{"/api/fs/download?path=" + qs(filepath.Join(h.root, "没有")), "not_found", http.StatusNotFound},
+		// 目录：不能 200。真 200 的话浏览器会存下一个内容未定义的文件
+		{"/api/fs/download?path=" + qs(sub), "is_directory", http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		res := h.download(c.q, nil)
+		if res.StatusCode != c.status {
+			t.Errorf("%s 应 %d, got %d", c.q, c.status, res.StatusCode)
+			continue
+		}
+		if res.StatusCode == http.StatusOK {
+			continue
+		}
+		assertErrorCode(t, res, strings.TrimSpace(c.code))
 	}
 }

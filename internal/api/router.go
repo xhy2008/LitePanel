@@ -130,6 +130,7 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Get("/fs/list", authed(handleFSList(deps.Files)))
 			a.Get("/fs/stat", authed(handleFSStat(deps.Files)))
 			a.Get("/fs/roots", authed(handleFSRoots(deps.Files)))
+			a.Get("/fs/download", authed(handleFSDownload(deps.Files)))
 			a.Post("/fs/mkdir", authed(handleFSMkdir(deps.Files)))
 			a.Post("/fs/rename", authed(handleFSRename(deps.Files)))
 		}

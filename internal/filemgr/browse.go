@@ -355,11 +355,16 @@ var mimeByExt = map[string]string{
 	".apk":  "application/vnd.android.package-archive",
 }
 
-// mimeOf 按扩展名粗判（设计 8.1）。刻意不用 mime.TypeByExtension：
+// MimeOf 按扩展名粗判（设计 8.1）。刻意不用 mime.TypeByExtension：
 // 它读 /etc/mime.types，带 charset 参数（"text/markdown; charset=utf-8"），
 // 而且**这台机器上有没有那个文件都不一定** —— 图标映射要的是跨机器
 // 稳定的查表，不是内容协商。
-func mimeOf(name string, isDir bool) string {
+//
+// 导出是因为下载端点也要给它 Content-Type，而两处用不同的表会产生
+// "列表里显示压缩包图标、下载下来 MIME 是二进制"这类对不上的细节，
+// 排查时没人会想到是两张表。列表侧的内部调用留着同名小写包装，
+// 免得把 browse.go 里所有调用点一起改名冲淡这次的 diff。
+func MimeOf(name string, isDir bool) string {
 	if isDir {
 		return "inode/directory"
 	}
@@ -368,3 +373,6 @@ func mimeOf(name string, isDir bool) string {
 	}
 	return "application/octet-stream"
 }
+
+// mimeOf 是包内旧调用点的别名（browse.go 里列条目的地方）。
+func mimeOf(name string, isDir bool) string { return MimeOf(name, isDir) }

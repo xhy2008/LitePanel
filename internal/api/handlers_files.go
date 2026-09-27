@@ -27,7 +27,13 @@ type Files interface {
 	Mkdir(ctx context.Context, path string) error
 	Rename(ctx context.Context, from, to string) error
 	Roots(ctx context.Context) ([]filemgr.Root, error)
+	Open(ctx context.Context, path string) (filemgr.Opened, error)
 }
+
+// 编译期把"真家伙满足接口"钉住。没有这行，接口与 *filemgr.Service 的
+// 脱节只会在装配测试跑到时才暴露，而那时报错的是 cmd 包，看不出是
+// 接口漏了方法还是实现签名漂了。
+var _ Files = (*filemgr.Service)(nil)
 
 // fileListQuery 把 URL 查询参数翻成 ListOptions。
 //
@@ -198,6 +204,11 @@ func writeFSError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "bad_path", err.Error())
 	case errors.Is(err, filemgr.ErrNotDirectory):
 		writeError(w, http.StatusBadRequest, "not_directory", err.Error())
+	case errors.Is(err, filemgr.ErrIsDirectory):
+		// 与 ErrNotDirectory 是两个方向相反的判断，不能合并成一个错误：
+		// 那句提示的意思正好相反，合并的话必有一侧对用户说反话。
+		// 回 400 而不是 404 —— 目录确实在，只是不能这么下载。
+		writeError(w, http.StatusBadRequest, "is_directory", err.Error())
 	case errors.Is(err, filemgr.ErrExists):
 		// 409：前端按它弹"重命名建议 / 是否覆盖"，而不是把红字甩在脸上。
 		// 这也是 rename 唯一的护栏（Unix rename(2) 默认覆盖目标，D14 下
