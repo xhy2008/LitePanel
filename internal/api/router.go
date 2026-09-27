@@ -107,6 +107,7 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Post("/term/sessions", authed(handleTermSessionsCreate(deps.TermSessions)))
 			a.Patch("/term/sessions/{id}", authed(handleTermSessionsRename(deps.TermSessions)))
 			a.Delete("/term/sessions/{id}", authed(handleTermSessionsDelete(deps.TermSessions)))
+			a.Get("/term/sessions/{id}/output", authed(handleTermSessionOutput(deps.TermSessions)))
 		}
 		if deps.Commands != nil {
 			a.Get("/commands", authed(handleCommandsList(deps.Commands)))

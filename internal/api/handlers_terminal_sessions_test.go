@@ -29,8 +29,9 @@ var errBoom = errors.New("存储层炸了")
 type stubSess struct {
 	calls []string
 
-	list []terminal.SessionMeta
-	err  error
+	list   []terminal.SessionMeta
+	err    error
+	output string // CorpseOutput 的返回值（id=3 有词，其余空）
 }
 
 func (s *stubSess) record(f string) { s.calls = append(s.calls, f) }
@@ -62,6 +63,20 @@ func (s *stubSess) Rename(ctx context.Context, id int64, title string) error {
 		}
 	}
 	return nil
+}
+
+func (s *stubSess) CorpseOutput(ctx context.Context, id int64) (string, error) {
+	s.record("output:" + strconv.FormatInt(id, 10))
+	if id == 999 {
+		return "", terminal.ErrSessionNotFound
+	}
+	if s.err != nil {
+		return "", s.err
+	}
+	if id == 3 {
+		return s.output, nil
+	}
+	return "", nil
 }
 
 func (s *stubSess) Delete(ctx context.Context, id int64) error {
@@ -360,4 +375,59 @@ func mustJSONGet(t *testing.T, e *pwEnv) map[string]any {
 		t.Fatalf("列表应 200, got %d %+v", code, body)
 	}
 	return body
+}
+
+// exit_status 是死因的对外契约（nil/null=活着或没观测过，-1=凭空消失，
+// 0=正常退出[会被后端自动删]，>0=异常退出码）。前端全靠它把异常退出的
+// 标签标成「命令异常退出 N」——字段名或类型漂了，异常会话就会显示成
+// 普通死会话，正是用户要求手动清理时需要知道的那个信息。
+func TestTermSessionsListCarriesExitStatus(t *testing.T) {
+	seven := 7
+	sm := &stubSess{list: []terminal.SessionMeta{
+		{ID: 1, TmuxName: "lp-1", Title: "异常", Alive: false, ExitStatus: &seven},
+		{ID: 2, TmuxName: "lp-2", Title: "活着", Alive: true},
+	}}
+	e := newTermAPIEnv(t, sm)
+	code, body := e.do("GET", "/api/term/sessions", "")
+	if code != http.StatusOK {
+		t.Fatalf("应 200, got %d %s", code, body)
+	}
+	got := sessionsOf(t, body)
+	if len(got) != 2 {
+		t.Fatalf("列表不符: %+v", got)
+	}
+	if got[0]["exit_status"] != float64(7) {
+		t.Fatalf("exit_status 必须是数字 7（前端据此标'异常退出'）: %+v", got[0])
+	}
+	v, ok := got[1]["exit_status"]
+	if !ok || v != nil {
+		t.Fatalf("活会话的 exit_status 必须是显式 null（不是缺字段）: %+v", got[1])
+	}
+}
+
+// 遗言端点：GET /api/term/sessions/{id}/output。
+// 异常退出的 tab 点进去，前端靠它显示死前最后几屏。
+// 三种返回各有语义：有历史→原文；会话消失→空串+200（前端显示
+// "无输出记录"）；库里没这个 id→404。
+func TestTermSessionOutput(t *testing.T) {
+	sm := &stubSess{list: sessList(3, "跑备份", false)}
+	sm.output = "遗言正文"
+	e := newTermAPIEnv(t, sm)
+
+	code, body := e.do("GET", "/api/term/sessions/3/output", "")
+	if code != http.StatusOK {
+		t.Fatalf("应 200, got %d %s", code, body)
+	}
+	if body["output"] != "遗言正文" {
+		t.Fatalf("output 字段不符: %+v", body)
+	}
+	if got := sm.calls[len(sm.calls)-1]; got != "output:3" {
+		t.Fatalf("必须带 id 调 CorpseOutput, got %s", got)
+	}
+
+	// 未知 id → 404（service 报 ErrSessionNotFound）
+	code, _ = e.do("GET", "/api/term/sessions/999/output", "")
+	if code != http.StatusNotFound {
+		t.Fatalf("未知 id 应 404, got %d", code)
+	}
 }

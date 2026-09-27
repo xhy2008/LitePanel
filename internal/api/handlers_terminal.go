@@ -50,6 +50,7 @@ type TermSessions interface {
 	Create(ctx context.Context, in terminal.SessionInput) (terminal.SessionMeta, error)
 	Rename(ctx context.Context, id int64, title string) error
 	Delete(ctx context.Context, id int64) error
+	CorpseOutput(ctx context.Context, id int64) (string, error)
 }
 
 // handleTermSessionsList 返回会话列表（含 tmux 里已消失的，alive=false）。
@@ -186,4 +187,23 @@ func decodeStrict(r *http.Request, dst any) error {
 
 func chiID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+}
+
+// handleTermSessionOutput 返回会话的最后输出（"遗言"）。
+//
+// 空 output + 200 是有效语义："这个会话没有可读的历史"（消失的尸体
+// 没有 grid）。前端据此显示"无输出记录"，而不是弹一个红色的加载失败。
+func handleTermSessionOutput(svc TermSessions) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		txt, err := svc.CorpseOutput(r.Context(), id)
+		if err != nil {
+			termWriteErr(w, err, "读取会话输出失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"output": txt})
+	}
 }

@@ -533,3 +533,66 @@ func TestReconcileRevivesRows(t *testing.T) {
 		t.Fatalf("tmux 里明明活着，对账必须复活并清死因: %+v", got)
 	}
 }
+
+// 遗言回放（异常退出的 tab 点进去看最后的输出）。
+//
+// 实测的两块地基：
+//   - capture-pane 在尸体上读得到历史（dev/hold）；
+//   - capture-pane 的 -t **不认 = 精确前缀**（实测 "can't find pane:
+//     =cap1"）—— 只能裸名，而裸名是前缀匹配。所以必须先 HasSession
+//     （=name，精确）确认，再裸名 capture：两步之间名字被释放又恰好
+//     被 lp-1 撞上 lp-10 的概率可以忽略，而盲 capture 是必错的。
+func TestCorpseOutputReadable(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx := newServiceEnv(t)
+	meta, err := svc.Create(ctx, SessionInput{Title: "留话"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = KillSession(DefaultBin, meta.TmuxName) })
+
+	waitPrompt(t, meta.TmuxName)
+	runTMUX(t, "send-keys", "-t", meta.TmuxName+":.0", "echo 临终遗言XYZ", "Enter")
+	time.Sleep(300 * time.Millisecond)
+	runTMUX(t, "send-keys", "-t", meta.TmuxName+":.0", "exit 5", "Enter")
+	waitCorpse(t, meta.TmuxName)
+
+	txt, err := svc.CorpseOutput(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(txt, "临终遗言XYZ") {
+		t.Fatalf("遗言必须读得到, got %q", txt)
+	}
+}
+
+// 会话消失（尸体被 kill-server 毁了）：没有历史可显示，回空串而不是
+// 报错 —— 前端 tab 还在（库里有行），页面显示"无输出记录"比弹错误对。
+func TestCorpseOutputGoneIsEmpty(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx := newServiceEnv(t)
+	meta, err := svc.Create(ctx, SessionInput{Title: "无话可说"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := KillSession(DefaultBin, meta.TmuxName); err != nil {
+		t.Fatal(err)
+	}
+	txt, err := svc.CorpseOutput(ctx, meta.ID)
+	if err != nil {
+		t.Fatalf("消失的会话回空串即可, got err=%v", err)
+	}
+	if txt != "" {
+		t.Fatalf("应该没内容, got %q", txt)
+	}
+}
+
+// 库里没有的 id 必须报 ErrSessionNotFound（API 映射成 404）。
+// 绝不拿编造的 tmux 名去问 tmux。
+func TestCorpseOutputUnknownID(t *testing.T) {
+	tmuxReady(t)
+	svc, ctx := newServiceEnv(t)
+	if _, err := svc.CorpseOutput(ctx, 424242); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("未知 id 应报 ErrSessionNotFound, got %v", err)
+	}
+}

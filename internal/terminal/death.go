@@ -17,6 +17,7 @@ package terminal
 //   server 连不上            未知          → 什么都不动
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -119,3 +120,39 @@ func splitPaneLine(line string) (name, dead, status string, ok bool) {
 // ExitVanished：会话凭空消失（外部 kill-session，或面板与 tmux 一起死
 // 且没来得及记码）。与真实退出码同域存放，前端显示成"异常消失"。
 const ExitVanished = -1
+
+// CorpseOutput 取一个会话的最后输出（"遗言"）：异常退出的 tab 点进去，
+// 用户要看到死前的最后几屏。
+//
+// 实测的两块地基：
+//   - capture-pane 在尸体上读得到历史（死 pane 的 grid 还在）；
+//   - capture-pane 的 -t **不认 = 精确前缀**（"can't find pane: =cap1"）
+//     —— 只能裸名，而裸名是前缀/唯一匹配。所以先用 HasSession(=name)
+//     精确确认存在，再裸名 capture：直接把库里的名字喂给 capture 会
+//     在"名字被释放后被别的会话以相似前缀复用"时读到别人的屏幕。
+//     会话名由我们生成（lp-<rowid>），残留竞争窗口以毫秒计，实践安全；
+//     这里取"先确认、后读取"的顺序作为能做到的最强约束。
+//
+// 会话已消失（消失的尸体没有 grid 可读）时返回空串而不是 error：
+// 库里的行还在（带着死因），前端显示"无输出记录"比弹错误更好解释。
+func (s *Service) CorpseOutput(ctx context.Context, id int64) (string, error) {
+	meta, err := GetSessionMeta(s.db, id)
+	if err != nil {
+		return "", err // 未知 id 在这里就是 ErrSessionNotFound
+	}
+	name := meta.TmuxName
+	ok, err := HasSession(s.bin, name)
+	if err != nil {
+		return "", err // ErrNoServer 等照实上抛：这是"不知道"，不是"没有"
+	}
+	if !ok {
+		return "", nil // 消失的会话没有历史：空串
+	}
+	out, err := exec.CommandContext(ctx, s.bin,
+		"capture-pane", "-p", "-S", "-", "-t", name).CombinedOutput()
+	if err != nil {
+		// 确认和读取之间会话没了：与上面同样对待
+		return "", nil
+	}
+	return string(out), nil
+}
