@@ -17,3 +17,4 @@ web/coverage/
 /logx.test
 *.test
 /litepanel
+dev/
