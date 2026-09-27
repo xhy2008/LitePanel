@@ -14,6 +14,10 @@ export interface TermSessionRow {
   // alive 由后端每次列表时问一次 tmux 得到。它不是"库里写着在"：
   // 用户在 tmux 里自己 kill-session 之后，只有 tmux 知道会话没了。
   alive: boolean;
+  // 死因，仅 alive=false 有意义：>0 是进程退出码、-1 是"名字消失但读
+  // 不到退出码"、0 是正常退出（后端会自动清理这种行）、null 是没记录
+  // （活会话，或死因机制上线前留下的旧行）。
+  exit_status: number | null;
 }
 
 export interface TermSessionInput {

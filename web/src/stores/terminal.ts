@@ -45,6 +45,9 @@ interface State {
   // 用 state 而不是 return 值：会话是在 load() 里消失的，而 load 的调用方
   // 常常是轮询 —— 没人会去读一个后台轮询的返回值。
   notice: string;
+  // 异常/消失标签的"遗言"：最后一次输出（capture-pane 在尸体上读得到）。
+  // 点尸体标签时经 loadOutput 拉取；空串=没有可读历史或还没拉。
+  output: string;
 }
 
 export const useTerminalStore = defineStore('terminal', {
@@ -57,6 +60,7 @@ export const useTerminalStore = defineStore('terminal', {
     error: '',
     unavailable: false,
     notice: '',
+    output: '',
   }),
 
   getters: {
@@ -72,23 +76,37 @@ export const useTerminalStore = defineStore('terminal', {
       try {
         const r = await api.get<{ sessions: TermSessionRow[] | null }>('/api/term/sessions');
         const all = r.sessions ?? [];
-        // 退出的会话不进标签栏（真机反馈：它们变成灰色标签挂在那儿，
-        // 用户要点进去才知道没了）。后端仍然保留 alive=0 的行 —— 那里是
-        // "这个会话曾经存在"的唯一记录，也是本条提示的依据。
-        const alive = all.filter((x) => x.alive);
+        // 标签栏的准入规则：活着，或者**带着死因**死去。
+        //
+        // 死因（exit_status）决定一切：>0 = 命令异常退出、-1 = 会话凭空
+        // 消失，这两种都要留在标签栏让用户看见并手动删除（真机反馈的
+        // 反面是"灰色标签挂一堆"，但那次的病根其实是分不清哪个是异常）。
+        // 正常退出（0）由后端自动删行，这里露出来也只可能是残留；
+        // null 的死行来自死因机制上线之前，同样不翻出来打扰。
+        const shown = (r.sessions ?? []).filter((x) => shouldShow(x));
         // "刚刚还在"由跟上一次列表做差来保证，不需要额外的 loaded 标志位：
         // 首次载入时 this.sessions 本来就是空表，差集自然是空 —— 库里那些
         // 几小时前退出的历史行不会触发提示。（曾经加过 `if (this.loaded)`，
         // 变异测试证明它是死代码：删掉它任何测试都不红。）
-        const gone = this.sessions.filter(
-          (p) => p.alive && !alive.some((x) => x.id === p.id),
-        );
-        if (gone.length) {
-          this.notice = `会话已退出：${gone.map((g) => g.title).join('、')}`;
+        // 两种"刚刚还在，现在没了"都要提示，来源不同：
+        //   变化在列表里（带死因的死行留下）→ 提示里报退出码；
+        //   整行从列表里消失（正常退出被后端自动删）→ 只报标题。
+        // 少了后者，用户看到的就是标签凭空蒸发，什么解释都没有。
+        // 每轮重算而不是"只在有人死时设置"：同名会话复活之后，上一轮
+        // 那句"已退出"就过期了，留着是谎报。
+        const died = this.sessions.filter((p) => p.alive && !all.some((x) => x.id === p.id && x.alive));
+        if (died.length) {
+          const label = (g: TermSessionRow) => {
+            const fresh = all.find((x) => x.id === g.id);
+            return fresh ? deathLabel(g, fresh) : g.title;
+          };
+          this.notice = `会话已退出：${died.map(label).join('、')}`;
+        } else {
+          this.notice = '';
         }
-        this.sessions = alive;
-        // 只在没有选中（或选中项已不存在）时落到第一个：会话切换是有状态的
-        // （那个 shell 正在跑东西），不能被一次刷新抢走。
+        this.sessions = shown;
+        // active 只在它**从标签栏消失**时才挪走。异常退出不动 active：
+        // 用户就看着它死在眼前，跳到别的标签等于把案发现场撤了。
         if (!this.sessions.some((s) => s.id === this.activeId)) {
           this.activeId = this.sessions[0]?.id ?? 0;
         }
@@ -100,6 +118,22 @@ export const useTerminalStore = defineStore('terminal', {
         this.error = errorMessage(e);
       } finally {
         this.loading = false;
+      }
+    },
+
+    /** 拉一个会话的最后输出（遗言）。见 state.output 的注释。 */
+    async loadOutput(id: number) {
+      // 先清空再发请求：上一个会话的遗言绝不能在这一帧盖在新的上面
+      // （甲死因是 137、乙根本没有历史 —— 中间帧显示甲的字就是编故事）。
+      this.output = '';
+      const { api } = getApi();
+      try {
+        const r = await api.get<{ output: string }>(`/api/term/sessions/${id}/output`);
+        this.output = r.output ?? '';
+      } catch {
+        // 不弹红色错误条：遗言是"能看见最好"的补充信息，拉不到就显示
+        // "无输出记录"。真正要用户处理的事（删除/重开）浮层里都有。
+        this.output = '';
       }
     },
 
@@ -178,3 +212,23 @@ export const useTerminalStore = defineStore('terminal', {
     },
   },
 });
+
+/** 死行要不要出现在标签栏：活着，或带着可展示的死因。 */
+function shouldShow(x: TermSessionRow): boolean {
+  return x.alive || x.exit_status === -1 || (x.exit_status ?? 0) > 0;
+}
+
+/** "跑任务（退出码 137）"；-1 没有码可报，说"已消失"。 */
+function deathLabel(old: TermSessionRow, fresh: TermSessionRow): string {
+  const code = fresh.exit_status;
+  if (code === null) return old.title;
+  return code === -1 ? `${old.title}（已消失）` : `${old.title}（退出码 ${code}）`;
+}
+
+/** 死因角标文案（与 quickcmd 的忙闲 tabBadge 是两种角标：那个说忙/空闲，这个说死亡原因）。：活着没有角标；异常显示退出码；消失没有码可报。 */
+export function deathBadge(x: TermSessionRow): string {
+  if (x.alive) return '';
+  if (x.exit_status === -1) return '消失';
+  if (x.exit_status !== null && x.exit_status > 0) return `异常(${x.exit_status})`;
+  return '';
+}

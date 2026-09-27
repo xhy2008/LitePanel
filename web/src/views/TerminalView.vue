@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import AppIcon from '../components/AppIcon.vue';
 import Sheet from '../components/services/Sheet.vue';
-import { useTerminalStore, autoTitle } from '../stores/terminal';
+import { useTerminalStore, autoTitle, deathBadge } from '../stores/terminal';
 import { useQuickCmdStore, tabBadge } from '../stores/quickcmd';
 import { useBusyWatch } from '../composables/useBusyWatch';
 import { createTerminalRuntime } from '../composables/useTerminal';
@@ -43,7 +43,9 @@ const busy = computed(() => store.loading || store.creating);
 // 抽屉
 const formOpen = ref(false);
 const form = ref({ title: '', cwd: '', history: DEFAULT_HISTORY_LIMIT });
-const confirmDelete = ref<{ id: number; title: string } | null>(null);
+// dead：从尸体标签进来的删除。确认文案必须区分 —— 对着一具尸体说
+// "正在运行的程序会被一起终止"是错的，这时唯一被删掉的是遗言记录。
+const confirmDelete = ref<{ id: number; title: string; dead?: boolean } | null>(null);
 const renameTo = ref<{ id: number; title: string } | null>(null);
 
 let client: WsClient | null = null;
@@ -137,22 +139,56 @@ const runtimes = useTermRuntimes<TermRuntime>({ make: makeRuntime });
 
 const activeId = computed(() => store.activeId);
 const activeRow = computed(() => store.active);
+// 当前标签是尸体（异常退出/消失）：不挂 xterm（尸体上 attach 出来的
+// 控制连接是半开的假连接），显示遗言浮层。
+const deadActive = computed(() => !!activeRow.value && !activeRow.value.alive);
+const deadBadge = computed(() => (activeRow.value ? deathBadge(activeRow.value) : ''));
+// 遗言是为哪个会话拉的。不能拿 output==='' 当"还没拉过"：会话消失时
+// 遗言本来就是空串，那样判会每拍重拉；而在 watcher 里清 output 再拉
+// 则是自激循环（清空 -> deadActive 分支再进 watcher）。
+const outputFor = ref(0);
 const offline = computed(() => wsStatus.value !== 'online');
 const suggestion = computed(() => autoTitle(form.value.title, store.sessions));
 
-// 当前会话换了，就要有实例。
-//
-// 这里不再判 alive：store.load 已经把退出的会话整个摘掉，activeRow 要么
-// 活着要么不存在。会话退出时的表现由那条路径负责 —— activeId 落到下一个
-// 活会话，下面的 watch 就会 focus(新 id)，旧实例在同一拍里被 drop。
+// 当前会话换了，就要有实例 —— 除非它已经是一具尸体。
 async function syncActive() {
   await nextTick();
+  // 尸体不挂 xterm：attach 到尸体上，控制连接会半开地挂着（tmux 对
+  // remain-on-exit 的会话照常回 attach 成功），屏幕从此不再有任何输出。
+  // active 是尸体时遗言浮层接管这个 pane 的位置。
+  if (deadActive.value) {
+    runtimes.focus(0); // 回收现有实例：留着它只会继续收上一个会话的输出
+    return;
+  }
   runtimes.focus(activeId.value || 0);
 }
 
 watch(activeId, syncActive);
 
+// 正在看的会话当场死掉：activeId 不变，上面的 watch 不会响。
+watch(deadActive, (dead) => {
+  if (dead && activeRow.value && outputFor.value !== activeRow.value.id) {
+    outputFor.value = activeRow.value.id;
+    store.loadOutput(activeRow.value.id);
+  }
+});
+
 async function pick(id: number) {
+  const row = store.sessions.find((x) => x.id === id);
+  if (row && !row.alive) {
+    // 尸体标签可以点：看的是死前最后的输出（遗言），不是终端。
+    // 先拉遗言、后切 activeId：loadOutput 同步清空 + 异步填充，如果先切
+    // 过去，中间那一帧浮层显示的是空/上一个会话的内容。
+    const prev = store.activeId;
+    outputFor.value = id;
+    await store.loadOutput(id);
+    // 等待期间用户又点了别的标签（active 已被改动）：这次切换作废，
+    // 遗言已经进 store 也无所谓 —— active 不是它，浮层不会渲染它。
+    if (store.activeId !== prev) return;
+    store.select(id);
+    await syncActive();
+    return;
+  }
   if (id === store.activeId) return;
   store.select(id);
   await syncActive();
@@ -261,11 +297,12 @@ onUnmounted(() => {
             :class="{ on: s.id === store.activeId }"
             role="tab"
             :aria-selected="s.id === store.activeId"
-            :title="s.tmux_name"
+            :title="s.alive ? s.tmux_name : deathBadge(s) + '：点击查看最后的输出'"
             @click="pick(s.id)"
           >
-            <span class="dot" />
+            <span class="dot" :class="{ dead: !s.alive }" />
             <span class="tname">{{ s.title }}</span>
+            <span v-if="!s.alive" class="tdead">{{ deathBadge(s) }}</span>
             <span v-if="tabBadge(cmds.busy[s.id])" class="tbusy">{{ tabBadge(cmds.busy[s.id]) }}</span>
             <span
               v-if="s.id === store.activeId"
@@ -331,9 +368,24 @@ onUnmounted(() => {
           <p>{{ store.loading ? '载入中…' : '还没有终端会话' }}</p>
           <button class="go" :disabled="busy" @click="formOpen = true">新建会话</button>
         </div>
-        <!-- 退出的会话不再留在标签栏里（store.load 把它们摘掉了）：
-             灰标签挂在那儿、要点进去才知道没了，比直接消失更让人困惑。
-             "为什么少了个标签"由 store.notice 说清楚。 -->
+        <!-- 尸体标签被点进来：浮层顶替终端。不挂 xterm —— attach 到尸体上
+             控制连接会半开地挂着（tmux 对 remain-on-exit 照常回成功），
+             屏幕从此不再有任何输出，比不显示更难解释。
+             遗言：capture-pane 在尸体上读得到 grid；空串=没有可读历史
+             （会话整个消失过，grid 随 server 没了）。 -->
+        <div v-else-if="deadActive" class="blank">
+          <p>
+            会话「{{ activeRow?.title }}」{{
+              activeRow?.exit_status === -1 ? '已消失（读不到退出码）' : `命令异常退出（退出码 ${activeRow?.exit_status ?? '?'}）`
+            }}
+          </p>
+          <pre v-if="store.output" class="lastwords">{{ store.output }}</pre>
+          <p v-else class="lastwords-hint">无输出记录（会话整个消失，历史随 tmux 服务一起没了）</p>
+          <div class="row">
+            <button class="ghost" :disabled="busy" @click="confirmDelete = { id: activeRow!.id, title: activeRow!.title, dead: true }">删除</button>
+            <button class="go" :disabled="busy" @click="formOpen = true">新建会话</button>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -365,7 +417,10 @@ onUnmounted(() => {
       icon="alert"
       @close="confirmDelete = null"
     >
-      <p>
+      <p v-if="confirmDelete.dead">
+        会话「{{ confirmDelete.title }}」已经退出。删除后这段最后的输出也会一并清除，且无法恢复。
+      </p>
+      <p v-else>
         会话「{{ confirmDelete.title }}」里正在运行的程序会被一起终止，且无法恢复。
       </p>
       <template #footer>
@@ -427,6 +482,42 @@ onUnmounted(() => {
   height: 6px;
   border-radius: 50%;
   background: var(--ok);
+}
+/* 死因角标：红底小号，与"忙"（tbusy，黄色）用同一套位置但颜色分流 ——
+   用户扫一眼标签栏就该分出"在跑 / 空闲 / 出事了"。 */
+.tdead {
+  font-size: 10.5px;
+  color: var(--err);
+  border: 1px solid var(--err);
+  border-radius: 999px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.dot.dead {
+  background: var(--err);
+}
+.lastwords {
+  width: min(720px, 92%);
+  max-height: 46vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+.lastwords-hint {
+  color: var(--text-dim);
+}
+.row {
+  display: flex;
+  gap: 8px;
 }
 .tbusy {
   font-size: 10px;

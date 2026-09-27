@@ -76,6 +76,7 @@ function termRow(id: number): TermSessionRow {
   return {
     id, title: `lp-${id}`, cwd: '', shell: 'bash', created_at: 0, tmux_name: `lp-${id}`,
     history_limit: 20000, last_attached_at: 0, alive: true,
+    exit_status: null,
   };
 }
 

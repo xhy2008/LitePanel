@@ -15,6 +15,7 @@ function row(over: Partial<TermSessionRow> = {}): TermSessionRow {
     created_at: 1_700_000_000,
     last_attached_at: 0,
     alive: true,
+    exit_status: null,
     ...over,
   };
 }
@@ -267,12 +268,15 @@ describe('errorMessage', () => {
   });
 });
 
-// 会话在 tmux 里 exit 之后，标签必须自己消失（真机反馈）：之前它变成
-// 灰色的"已退出"标签挂在标签栏上，用户要一个个点进去才知道没了。
+// 会话退出后的标签行为（两次真机反馈的合并裁决）：
+//   正常退出 → 行整个消失（后端自动删）+ 提示一句；
+//   异常退出/消失 → 标签留在栏里带死因，手动删除才走。
+// 不再是一律"灰色标签挂着"，也不是一律"摘掉"—— 摘掉正常退出的是
+// 减少噪音，留下异常退出的是保留案发现场。
 //
 // 只在"这个标签刚刚还在"时提示一句。第一次进页面看见库里躺着的历史死行
 // 不提示 —— 那是几小时前退出的会话，弹一句"已退出"是在打扰。
-describe('terminal store：退出的会话自动摘掉', () => {
+describe('terminal store：退出的会话按死因分流', () => {
   it('列表里没有 dead 标签，只留活着的', async () => {
     const { store } = boot({
       get: vi.fn(async () => ({ sessions: [row({ id: 1 }), row({ id: 2, alive: false })] })),
@@ -320,5 +324,173 @@ describe('terminal store：退出的会话自动摘掉', () => {
     store.activeId = 2;
     await store.load();
     expect(store.activeId).toBe(1);
+  });
+});
+
+// 死因落进标签栏（设计裁决：正常退出=自动清理不留行；异常退出/消失=
+// 保留，标签上标死因，手动删除才消失）。
+// 后端把死因放在 exit_status：>0 退出码、-1 消失、null 没记录、0 正常
+// （正常退出的行后端已经删了，出现在这里也只可能是历史残留）。
+describe('terminal store：带死因的尸体标签要留在标签栏', () => {
+  it('异常退出的行留在列表里（不是被摘掉）', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions: [row({ id: 1 }), row({ id: 2, alive: false, exit_status: 5 })],
+      })),
+    });
+    await store.load();
+    expect(store.sessions.map((s) => s.id)).toEqual([1, 2]);
+  });
+
+  it('消失的行（-1）也留着', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions: [row({ id: 2, alive: false, exit_status: -1 })],
+      })),
+    });
+    await store.load();
+    expect(store.sessions.map((s) => s.id)).toEqual([2]);
+  });
+
+  // 死因是 null 的死行只可能来自旧版本（那时还没记 exit_status）。
+  // 不显示：用户裁决是"异常退出要看得见"，不是"所有历史死行都翻出来"。
+  it('没有死因记录的历史死行仍然隐藏', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions: [row({ id: 2, alive: false, exit_status: null })],
+      })),
+    });
+    await store.load();
+    expect(store.sessions).toEqual([]);
+  });
+
+  it('正常退出码的死行也隐藏（后端会自动删，露出=残留）', async () => {
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions: [row({ id: 2, alive: false, exit_status: 0 })],
+      })),
+    });
+    await store.load();
+    expect(store.sessions).toEqual([]);
+  });
+
+  // 正在看的会话死了：标签和 active 都不动 —— 用户就看着它死在眼前，
+  // 屏幕跳到别的标签等于把现场撤了。badge 变红就是全部交代。
+  // （这条刻意推翻旧契约"退出后 active 落到活着的下一个"：尸体现在
+  // 留在标签栏，跳走反而藏起了死因。）
+  it('当前会话异常退出：active 不动，标签留在原地', async () => {
+    let round = 0;
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions:
+          round++ === 0
+            ? [row({ id: 1 }), row({ id: 2 })]
+            : [row({ id: 1 }), row({ id: 2, alive: false, exit_status: 137 })],
+      })),
+    });
+    await store.load();
+    store.activeId = 2;
+    await store.load();
+    expect(store.activeId).toBe(2);
+    expect(store.sessions.map((s) => s.id)).toEqual([1, 2]);
+  });
+
+  // 提示要说清死因：'跑任务' 和 '跑任务（退出码 137）' 是两种排查方向。
+  it('刚死的会话在提示里带退出码', async () => {
+    let round = 0;
+    const { store } = boot({
+      get: vi.fn(async () => ({
+        sessions:
+          round++ === 0
+            ? [row({ id: 2, title: '跑任务', tmux_name: 'lp-2' })]
+            : [row({ id: 2, title: '跑任务', tmux_name: 'lp-2', alive: false, exit_status: 137 })],
+      })),
+    });
+    await store.load();
+    await store.load();
+    expect(store.notice).toContain('跑任务');
+    expect(store.notice).toContain('137');
+  });
+
+  // 正常退出：行会在下一轮整个消失（后端自动删）。第一轮它可能以
+  // exit_status=0 露面一次 —— 提示仍然要说，但不进"留堂"名单。
+  it('死而复生（同名复活）后死因标记不再提示', async () => {
+    // 用显式数组而不是自增计数器写轮次：三元里再写一次 round++ 会让
+    // 第二、三轮取到同一个分支，测的就不是"死→复活"这条轨迹了（踩过）。
+    const rounds = [
+      [row({ id: 2 })],
+      [row({ id: 2, alive: false, exit_status: 2 })],
+      [row({ id: 2 })],
+    ];
+    let n = 0;
+    const { store } = boot({
+      get: vi.fn(async () => ({ sessions: rounds[n++] })),
+    });
+    await store.load();
+    expect(store.notice).toBe('');
+    await store.load();
+    expect(store.notice).toContain('退出码 2');
+    await store.load();
+    // 复活之后上一轮那句"已退出"必须收回：留着是谎报
+    expect(store.notice).toBe('');
+    expect(store.sessions[0].alive).toBe(true);
+  });
+});
+
+// 标签上的死因角标是纯映射（视图只渲染它）：异常退出显示码，消失显示
+// "消失"，活着没有角标。放 store 旁边测是为了不用把整个 xterm 视图挂起来
+// 才能钉住文案。
+import { deathBadge } from '../stores/terminal';
+
+describe('deathBadge', () => {
+  it('活会话没有角标', () => {
+    expect(deathBadge(row())).toBe('');
+  });
+  it('异常退出显示退出码', () => {
+    expect(deathBadge(row({ alive: false, exit_status: 137 }))).toBe('异常(137)');
+  });
+  it('消失显示消失', () => {
+    expect(deathBadge(row({ alive: false, exit_status: -1 }))).toBe('消失');
+  });
+});
+
+// 遗言：异常标签点进去，浮层显示最后输出。拉取放 store（可测），
+// 视图只管渲染 state。
+describe('terminal store：遗言拉取', () => {
+  it('loadOutput 存文本', async () => {
+    const { store } = boot({
+      get: vi.fn(async (url: string) =>
+        url.endsWith('/output') ? { output: '临终遗言' } : { sessions: [] },
+      ),
+    });
+    await store.loadOutput(5);
+    expect(store.output).toBe('临终遗言');
+  });
+
+  it('切换会话时先清空，不把上一个会话的遗言盖在新的上面', async () => {
+    let text = '甲的遗言';
+    const { store } = boot({
+      get: vi.fn(async (url: string) =>
+        url.endsWith('/output') ? { output: text } : { sessions: [] },
+      ),
+    });
+    await store.loadOutput(1);
+    text = ''; // 乙没有输出（会话消失）
+    const p = store.loadOutput(2);
+    // 同步段就必须清空：异步回来再清，中间那一帧显示的是甲的字
+    expect(store.output).toBe('');
+    await p;
+    expect(store.output).toBe('');
+  });
+
+  it('拉取失败不炸界面：output 留空、error 可展示', async () => {
+    const { store } = boot({
+      get: vi.fn(async (url: string) => {
+        if (url.endsWith('/output')) throw { status: 500, message: '读取失败' };
+        return { sessions: [] };
+      }),
+    });
+    await store.loadOutput(5);
+    expect(store.output).toBe('');
   });
 });
