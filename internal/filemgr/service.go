@@ -2,6 +2,8 @@ package filemgr
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"litepanel/internal/metrics"
 )
@@ -20,6 +22,25 @@ type Service struct {
 	// 直接读它的话"roots 必须包含 /"这类断言会在某些机器上因为环境
 	// 恰好不合而变红，而那不是被测代码的错。
 	procDir string
+
+	// uploadRoot 是分块暂存目录（面板自己的，绝不放进用户目录）。
+	uploadRoot string
+	// uploadTTL 是未完成会话的闲置上限。设计 8.2 说"关浏览器不中断"，
+	// 但也不能永远留着：上传一半关页面是常态，没有 TTL 用户的盘会
+	// 被面板悄悄吃满。
+	uploadTTL time.Duration
+	// maxChunk 是单块字节上限（服务端说了算，防止一个请求体写穿磁盘）。
+	maxChunk int64
+	// maxUpload 是整个上传的大小上限。超过它的要走 SFTP，见 ErrTooLarge。
+	maxUpload int64
+	// clock 注入时间（TTL 判定用）。
+	clock func() time.Time
+
+	// uploadMu 串行化同一会话元信息的读改写。分块各写各的文件、互不
+	// 相干（并发上传数默认 3），所以锁只保护 meta.json 这一小块。
+	// 挂在 Service 上而不是包级变量：包级锁会把无关面板实例（测试里
+	// 每个面板一个）串到同一把锁上，排查阻塞时非常误导。
+	uploadMu sync.Mutex
 }
 
 // Options 是装配参数。零值可用（procDir 默认 "/proc"）。
@@ -27,6 +48,17 @@ type Options struct {
 	ProcDir string
 	// DiskUsage 覆盖 statfs 实现（测试注入）。nil = 真实调用。
 	DiskUsage func(string) (diskUsage, error)
+
+	// UploadRoot 是分块暂存目录。空 = <db_path 同级>/uploads（装配层负责）。
+	UploadRoot string
+	// UploadTTL 覆盖闲置上限，零值 = DefaultUploadTTL。
+	UploadTTL time.Duration
+	// MaxChunkBytes 覆盖单块上限，零值 = DefaultMaxChunkBytes。
+	MaxChunkBytes int64
+	// MaxUploadBytes 覆盖整次上传上限，零值 = DefaultMaxUploadBytes。
+	MaxUploadBytes int64
+	// Clock 注入时间。nil = time.Now。
+	Clock func() time.Time
 }
 
 // NewService 装配文件管理服务。
@@ -39,8 +71,31 @@ func NewService(opts Options) *Service {
 	if usage == nil {
 		usage = realUsage
 	}
-	return &Service{procDir: dir, usage: usage}
+	clock := opts.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	ttl := opts.UploadTTL
+	if ttl <= 0 {
+		ttl = DefaultUploadTTL
+	}
+	maxChunk := opts.MaxChunkBytes
+	if maxChunk <= 0 {
+		maxChunk = DefaultMaxChunkBytes
+	}
+	maxUpload := opts.MaxUploadBytes
+	if maxUpload <= 0 {
+		maxUpload = DefaultMaxUploadBytes
+	}
+	return &Service{
+		procDir: dir, usage: usage,
+		uploadRoot: opts.UploadRoot, uploadTTL: ttl,
+		maxChunk: maxChunk, maxUpload: maxUpload, clock: clock,
+	}
 }
+
+// UploadRoot 暴露暂存根，供装配层与测试确认接的是哪一个目录。
+func (s *Service) UploadRoot() string { return s.uploadRoot }
 
 // diskUsage 是容量快照的本地别名 —— 不直接把 metrics.Usage 暴露成
 // JSON 契约类型：那会让 api 层的响应格式取决于 metrics 包的字段名，
