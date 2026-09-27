@@ -19,6 +19,7 @@ import (
 	"litepanel/internal/api"
 	"litepanel/internal/auth"
 	"litepanel/internal/config"
+	"litepanel/internal/filemgr"
 	"litepanel/internal/logx"
 	"litepanel/internal/metrics"
 	"litepanel/internal/service"
@@ -269,6 +270,10 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 变成装配函数自己的责任，测试也就能只调 buildDeps 来验证。
 		// Metrics / Services 需要 source、interval、db 等入参，仍由 main 接。
 		Term: wireTerminalHealth(),
+		// Files 同 Term：不需要外部入参（挂载表位置在 filemgr 里默认 /proc），
+		// 所以归 buildDeps 自己负责。漏接的后果是文件页整片 501，
+		// 而 501 在用户眼里就是"面板坏了"。
+		Files: filemgr.NewService(filemgr.Options{}),
 	}
 }
 

@@ -27,9 +27,23 @@ type harness struct {
 	sessions *auth.SessionStore
 	token    string
 	clock    *clock
+	// deps 留着：有的测试要在装配后改它再重建路由（少见），
+	// 更重要的是让 newHarnessWith 的回调产物有处可查。
+	deps *api.AuthDeps
 }
 
+// newHarness 装配一套共享的鉴权底座（db/sessions/limiter/clock）+ 路由。
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith 是可参数化装配：模块 Deps（Services/Files/...）由各测试
+// 自己塞进来。之所以是"改 deps 的回调"而不是一堆 newHarnessXxx 变体：
+// 每加一个模块就多一个变体，而底座那 20 行装配（含密码 hash 入库）会被
+// 复制粘贴 N 份 —— 改一处忘另一处的代价是"某个模块的测试在假底座上跑"，
+// 那种测试照样绿。
+func newHarnessWith(t *testing.T, mutate func(*api.AuthDeps)) *harness {
 	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "a.db"))
 	if err != nil {
@@ -48,15 +62,18 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	sessions := auth.NewSessionStore(db, clk.Now, 7*24*time.Hour)
-	limiter := auth.NewLoginLimiter(clk.Now, 5, 10*time.Minute)
 
-	h := &harness{t: t, sessions: sessions, clock: clk}
-	h.handler = api.NewRouter(nil, api.AuthDeps{
+	deps := api.AuthDeps{
 		DB:       db,
 		Sessions: sessions,
-		Limiter:  limiter,
+		Limiter:  auth.NewLoginLimiter(clk.Now, 5, 10*time.Minute),
 		Clock:    clk.Now,
-	})
+	}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	h := &harness{t: t, sessions: sessions, clock: clk, deps: &deps}
+	h.handler = api.NewRouter(nil, deps)
 
 	tok, err := sessions.Issue("ua", "127.0.0.1")
 	if err != nil {

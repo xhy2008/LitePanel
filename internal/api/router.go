@@ -51,6 +51,11 @@ type AuthDeps struct {
 	// 200 + 空列表会被渲染成"服务器上没有任何终端会话"）。
 	TermSessions TermSessions
 
+	// Files 为 nil 时文件接口返回 501（同 Services/Commands 的取舍：
+	// 200 + 空列表会被渲染成"这个目录是空的 / 这台机器没有磁盘"，
+	// 而真相是面板没接这个模块 —— 两者要的用户动作完全不同）。
+	Files Files
+
 	// Commands 为 nil 时快捷命令接口返回 501（同上：200 + 空列表会被渲染
 	// 成"没有任何快捷命令"，把"面板没接这个模块"说成"你还没添加过"）。
 	Commands Commands
@@ -120,6 +125,13 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Delete("/commands/{id}", authed(handleCommandsDelete(deps.Commands)))
 			a.Post("/commands/{id}/move", authed(handleCommandsMove(deps.Commands)))
 			a.Post("/commands/{id}/run", authed(handleCommandsRun(deps.Commands)))
+		}
+		if deps.Files != nil {
+			a.Get("/fs/list", authed(handleFSList(deps.Files)))
+			a.Get("/fs/stat", authed(handleFSStat(deps.Files)))
+			a.Get("/fs/roots", authed(handleFSRoots(deps.Files)))
+			a.Post("/fs/mkdir", authed(handleFSMkdir(deps.Files)))
+			a.Post("/fs/rename", authed(handleFSRename(deps.Files)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

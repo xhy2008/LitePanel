@@ -9,6 +9,7 @@ import (
 
 	"litepanel/internal/auth"
 	"litepanel/internal/config"
+	"litepanel/internal/filemgr"
 	"litepanel/internal/logx"
 	"litepanel/internal/store"
 	"litepanel/internal/ws"
@@ -102,4 +103,40 @@ func openTestDB(t *testing.T) *store.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// Files 必须在 buildDeps 里接上。
+//
+// 接在 buildDeps 而不是 main：它只需要 /proc 的位置，与其他需要外部入参
+// 的模块不同。放在 main 里的话，"文件页是不是 501"就取决于 main 有没有
+// 被跑到，装配测试覆盖不到 —— 而 501 是用户看到的"面板坏了"。
+func TestBuildDepsWiresFiles(t *testing.T) {
+	db := openTestDB(t)
+	deps := buildDeps(db, config.Config{}, ws.NewHub(), false, nil)
+	if deps.Files == nil {
+		t.Fatal("deps.Files 没接：文件页会整片 501")
+	}
+	// 真家伙能干活：列 /proc（任何 Linux/Android 上都在）。
+	// 断言"能列出东西"而不是"非 nil"：一个返回空实现的假接线也能过
+	// 非 nil 检查。
+	page, err := deps.Files.List(t.Context(), "/proc", filemgr.ListOptions{Size: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) == 0 || page.Total == 0 {
+		t.Fatalf("/proc 不可能列出空: %+v", page)
+	}
+}
+
+// 磁盘枚举接的是真实 /proc/mounts：roots 空 = 地址栏没有一个盘。
+func TestBuildDepsFilesRootsWork(t *testing.T) {
+	db := openTestDB(t)
+	deps := buildDeps(db, config.Config{}, ws.NewHub(), false, nil)
+	roots, err := deps.Files.Roots(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) == 0 {
+		t.Fatal("roots 为空：地址栏会显示“这台机器没有磁盘”")
+	}
 }
