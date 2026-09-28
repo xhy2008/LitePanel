@@ -116,6 +116,12 @@ func main() {
 	tw.Reconcile(bootCtx)
 	bootCancel()
 
+	// 上传暂存的定时清理。放在这里（而不是更早）是因为它依赖 deps 已经
+	// 接好 Files；ctx 在收到信号后取消，janitor 随之退出。
+	janitorCtx, janitorCancel := context.WithCancel(context.Background())
+	defer janitorCancel()
+	startUploadJanitor(janitorCtx, deps, uploadJanitorInterval)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -270,10 +276,20 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 变成装配函数自己的责任，测试也就能只调 buildDeps 来验证。
 		// Metrics / Services 需要 source、interval、db 等入参，仍由 main 接。
 		Term: wireTerminalHealth(),
-		// Files 同 Term：不需要外部入参（挂载表位置在 filemgr 里默认 /proc），
-		// 所以归 buildDeps 自己负责。漏接的后果是文件页整片 501，
+		// Files 同 Term：挂载表位置在 filemgr 里默认 /proc，不需要外部
+		// 入参，所以归 buildDeps 自己负责。漏接的后果是文件页整片 501，
 		// 而 501 在用户眼里就是"面板坏了"。
-		Files: filemgr.NewService(filemgr.Options{}),
+		//
+		// UploadRoot 是唯一必须由装配层给出的参数：暂存目录不能是相对
+		// 路径。留空的话它会落在 systemd 的 WorkingDirectory（多半是 /，
+		// 直接权限失败）或用户随手启动时所在的目录，而后者更糟 ——
+		// 在一个谁都没预期的地方攒文件，且换目录启动后旧暂存再也不会
+		// 被 GC 认出来（TTL 找不到它，等于永久占盘）。
+		// 选 db 同级：那里必然可写（面板正在往那里写 SQLite），且必然
+		// 属于面板自己，不会出现在用户的数据目录里。
+		Files: filemgr.NewService(filemgr.Options{
+			UploadRoot: uploadRootFor(cfg.DBPath),
+		}),
 	}
 }
 

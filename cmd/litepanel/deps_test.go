@@ -128,6 +128,47 @@ func TestBuildDepsWiresFiles(t *testing.T) {
 	}
 }
 
+// 上传暂存目录必须接成一个**绝对路径**，而且在 db 的同级目录里。
+//
+// 空值的后果不是"报错"，而是更糟的静默：filemgr 会把暂存建在进程的
+// 相对路径下，也就是 systemd 的 WorkingDirectory（多半是 /）或用户
+// 随手启动时所在的目录 —— 前者直接权限失败（用户看到的是"上传坏了"），
+// 后者在一个谁都没预期的地方攒出几百个文件，而且面板换了启动目录后
+// 旧暂存再也不会被 GC 认出来，永远留在盘上。
+//
+// 选 db 同级是因为它必然可写（面板正在往那里写 SQLite）且必然属于
+// 面板自己，而不是某个用户的数据目录。
+func TestBuildDepsWiresUploadRoot(t *testing.T) {
+	db := openTestDB(t)
+	cfg := config.Config{DBPath: filepath.Join(t.TempDir(), "litepanel.db")}
+	deps := buildDeps(db, cfg, ws.NewHub(), false, nil)
+	svc, ok := deps.Files.(*filemgr.Service)
+	if !ok {
+		t.Fatalf("Files 不是 *filemgr.Service: %T", deps.Files)
+	}
+	root := svc.UploadRoot()
+	if root == "" {
+		t.Fatal("UploadRoot 没接：暂存会落在进程 cwd 的相对路径下")
+	}
+	if !filepath.IsAbs(root) {
+		t.Errorf("UploadRoot 必须是绝对路径, got %q", root)
+	}
+	if filepath.Dir(root) != filepath.Dir(cfg.DBPath) {
+		t.Errorf("暂存该与 db 同级: %q vs %q", root, cfg.DBPath)
+	}
+	// 真能建会话：这一步同时证明那条路径真的可写（配置指向只读目录时，
+	// "非空字符串"这种断言照样绿，而用户第一次上传就失败）。
+	st, err := deps.Files.BeginUpload(t.Context(), filemgr.UploadInit{
+		ID: "wire", Dir: t.TempDir(), Name: "a.bin", Size: 4, ChunkSize: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ID != "wire" {
+		t.Errorf("会话没建出来: %+v", st)
+	}
+}
+
 // 磁盘枚举接的是真实 /proc/mounts：roots 空 = 地址栏没有一个盘。
 func TestBuildDepsFilesRootsWork(t *testing.T) {
 	db := openTestDB(t)
