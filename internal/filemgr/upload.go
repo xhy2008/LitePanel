@@ -90,6 +90,14 @@ const (
 //	fs.ErrNotExist   404（未知 id）
 //	context.Canceled 499/静默（客户端取消）
 var (
+	// ErrUploadDone 表示"这个会话已经收尾成功了"。
+	//
+	// 不复用 ErrExists：那个哨兵自己的文案是"目标已存在"，套到
+	// "取消一个已完成的上传"上会得到"目标已存在: 上传已完成，取消不了"
+	// —— 一句自相矛盾的话（实测冒烟里就是这么印出来的）。而且前端要
+	// 分得开这两种 409：一种要问"换个名字还是覆盖"，另一种要告诉用户
+	// "文件已经在了，要撤就用删除功能"。
+	ErrUploadDone    = errors.New("上传已完成")
 	ErrTooLarge      = errors.New("文件超过网页上传上限")
 	ErrChunkTooLarge = errors.New("分块超过单块上限")
 	ErrChunkIndex    = errors.New("分块序号越界")
@@ -376,7 +384,7 @@ func (s *Service) AbortUpload(ctx context.Context, id string) error {
 		// 撤销不了的已经就位：文件已经在用户目录里，删掉记录只会让用户
 		// 以为"取消成功"而磁盘上多一个文件。明确拒绝，前端提示"已完成，
 		// 如需删除请用删除功能"。
-		return fmt.Errorf("%w: 上传已完成，取消不了（用删除功能移除 %s）", ErrExists, meta.Path)
+		return fmt.Errorf("%w，取消不了（用删除功能移除 %s）", ErrUploadDone, meta.Path)
 	}
 	if err := os.RemoveAll(uploadDir); err != nil {
 		return fmt.Errorf("清理上传暂存 %s: %w", uploadDir, err)

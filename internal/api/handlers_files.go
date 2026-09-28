@@ -30,6 +30,14 @@ type Files interface {
 	Roots(ctx context.Context) ([]filemgr.Root, error)
 	Open(ctx context.Context, path string) (filemgr.Opened, error)
 	Zip(ctx context.Context, paths []string, w io.Writer) error
+
+	// 上传四件套（设计 8.2）。BeginUpload 建立或恢复会话；PutChunk 收块
+	// （参数在头里，见 handlers_upload.go）；UploadStatus 供断点续传查询；
+	// AbortUpload 丢弃已收的分块。
+	BeginUpload(ctx context.Context, in filemgr.UploadInit) (filemgr.UploadState, error)
+	PutChunk(ctx context.Context, c filemgr.UploadChunk) (filemgr.UploadState, error)
+	UploadStatus(ctx context.Context, id string) (filemgr.UploadState, error)
+	AbortUpload(ctx context.Context, id string) error
 }
 
 // 编译期把"真家伙满足接口"钉住。没有这行，接口与 *filemgr.Service 的

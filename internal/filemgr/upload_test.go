@@ -1145,3 +1145,34 @@ func TestUploadLateChunkAfterDone(t *testing.T) {
 		t.Error("迟到的块改动了已就位的文件")
 	}
 }
+
+// TestUploadAbortAfterDone 取消一个已完成的上传要如实拒绝。
+//
+// 谎报成功的代价是具体的：界面显示"已取消"，而文件好端端躺在用户目录
+// 里 —— 用户下一次看到它时，唯一能得出的结论是面板在乱写。
+//
+// 哨兵必须是 ErrUploadDone 而不是复用 ErrExists：后者自带文案"目标已存在"，
+// 套过来会印成"目标已存在: 上传已完成，取消不了"，一句自相矛盾的话
+// （真机冒烟里印出来过）。而且这两个 409 的正确补救动作相反 ——
+// 一个该问"改名还是覆盖"，另一个只能去删除。
+func TestUploadAbortAfterDone(t *testing.T) {
+	e := newUploadEnv(t)
+	full := content(8)
+	e.begin(t, "dn", "a.bin", int64(len(full)), 4, ConflictAsk)
+	for i := 0; i < 2; i++ {
+		if _, err := e.put(nil, "dn", i, chunkOf(full, i, 4)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := e.svc.AbortUpload(context.Background(), "dn")
+	if !errors.Is(err, ErrUploadDone) {
+		t.Fatalf("应 ErrUploadDone, got %v", err)
+	}
+	if errors.Is(err, ErrExists) {
+		t.Errorf("不该复用 ErrExists（文案会自相矛盾）: %v", err)
+	}
+	// 文件必须还在
+	if shaOf(t, filepath.Join(e.dir, "a.bin")) != shaHex(full) {
+		t.Error("拒绝取消时不该动文件")
+	}
+}

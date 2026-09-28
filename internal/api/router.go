@@ -134,6 +134,13 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Get("/fs/zip", authed(handleFSZip(deps.Files)))
 			a.Post("/fs/mkdir", authed(handleFSMkdir(deps.Files)))
 			a.Post("/fs/rename", authed(handleFSRename(deps.Files)))
+			// 上传。/fs/upload/begin 与 /fs/upload/{uploadID} 都是 POST/DELETE
+			// 的同前缀路径，chi 静态段优先，但顺序写在前头让"begin 被
+			// {uploadID} 吃掉"这种错一眼可见（同 /commands/busy 的写法）。
+			a.Post("/fs/upload/begin", authed(handleUploadBegin(deps.Files)))
+			a.Post("/fs/upload", authed(handleUploadChunk(deps.Files)))
+			a.Get("/fs/upload/{uploadID}/status", authed(handleUploadStatus(deps.Files)))
+			a.Delete("/fs/upload/{uploadID}", authed(handleUploadAbort(deps.Files)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

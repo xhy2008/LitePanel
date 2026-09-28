@@ -597,6 +597,16 @@ func (s stubFiles) Open(context.Context, string) (filemgr.Opened, error) {
 	return filemgr.Opened{}, s.err
 }
 func (s stubFiles) Zip(context.Context, []string, io.Writer) error { return s.err }
+func (s stubFiles) BeginUpload(context.Context, filemgr.UploadInit) (filemgr.UploadState, error) {
+	return filemgr.UploadState{}, s.err
+}
+func (s stubFiles) PutChunk(context.Context, filemgr.UploadChunk) (filemgr.UploadState, error) {
+	return filemgr.UploadState{}, s.err
+}
+func (s stubFiles) UploadStatus(context.Context, string) (filemgr.UploadState, error) {
+	return filemgr.UploadState{}, s.err
+}
+func (s stubFiles) AbortUpload(context.Context, string) error { return s.err }
 
 // 未知错误必须是 500，不能图省事归成 400。
 //
