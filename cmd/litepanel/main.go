@@ -289,6 +289,11 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 属于面板自己，不会出现在用户的数据目录里。
 		Files: filemgr.NewService(filemgr.Options{
 			UploadRoot: uploadRootFor(cfg.DBPath),
+			// 回收站按盘分置：这里给的是**目录名**（每个盘根下各建
+			// 一个），不是某个绝对路径 —— cfg 里那个键以前叫
+			// trash_path，绝对路径的语义已经没了（config 会拒绝旧键）。
+			TrashDirName: cfg.TrashDirName,
+			TrashRetain:  time.Duration(cfg.TrashRetainDays) * 24 * time.Hour,
 		}),
 	}
 }

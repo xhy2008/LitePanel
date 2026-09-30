@@ -181,3 +181,29 @@ func TestBuildDepsFilesRootsWork(t *testing.T) {
 		t.Fatal("roots 为空：地址栏会显示“这台机器没有磁盘”")
 	}
 }
+
+// 回收站的两项配置必须真的接进文件服务。
+//
+// 光加配置键不接线的话一切照跑、什么都不会坏 —— 除了用户改的值不起
+// 作用（改目录名/保留天数没有任何可见症状，不像漏接上传根那样有 501
+// 或空页面）。所以直接把值灌进去再读回来：断言的是"配置到此为止都是
+// 活的"。
+func TestBuildDepsWiresTrashConfig(t *testing.T) {
+	db := openTestDB(t)
+	cfg := config.Config{
+		DBPath:          filepath.Join(t.TempDir(), "litepanel.db"),
+		TrashDirName:    ".trash测试",
+		TrashRetainDays: 9,
+	}
+	deps := buildDeps(db, cfg, ws.NewHub(), false, nil)
+	svc, ok := deps.Files.(*filemgr.Service)
+	if !ok {
+		t.Fatalf("Files 不是 *filemgr.Service: %T", deps.Files)
+	}
+	if got := svc.TrashDirName(); got != ".trash测试" {
+		t.Errorf("回收站目录名没接上: %q", got)
+	}
+	if got := svc.TrashRetain(); got != 9*24*time.Hour {
+		t.Errorf("保留期没接上: %v", got)
+	}
+}
