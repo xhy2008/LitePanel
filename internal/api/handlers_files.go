@@ -38,6 +38,14 @@ type Files interface {
 	PutChunk(ctx context.Context, c filemgr.UploadChunk) (filemgr.UploadState, error)
 	UploadStatus(ctx context.Context, id string) (filemgr.UploadState, error)
 	AbortUpload(ctx context.Context, id string) error
+
+	// 回收站（设计 8.6 / D12，按盘分置）。DeleteMany 是界面上的"删除"：
+	// permanent=false 移进各盘自己的回收站，true 直接永久删除。
+	DeleteMany(ctx context.Context, paths []string, permanent bool) (int, error)
+	ListTrash(ctx context.Context) ([]filemgr.TrashItem, error)
+	RestoreTrash(ctx context.Context, id string) (string, error)
+	PurgeTrash(ctx context.Context, id string) error
+	EmptyTrash(ctx context.Context) (int, error)
 }
 
 // 编译期把"真家伙满足接口"钉住。没有这行，接口与 *filemgr.Service 的
@@ -219,6 +227,15 @@ func writeFSError(w http.ResponseWriter, err error) {
 		// 那句提示的意思正好相反，合并的话必有一侧对用户说反话。
 		// 回 400 而不是 404 —— 目录确实在，只是不能这么下载。
 		writeError(w, http.StatusBadRequest, "is_directory", err.Error())
+	case errors.Is(err, filemgr.ErrTrashUnwritable):
+		// 422 而不是 500：500 的意思是"面板坏了"，而这里坏的是环境
+		// （盘根只读 / 没权限），面板的行为完全正确 —— 它拒绝了一次会
+		// 变成跨盘复制的删除。前端要靠这个 code 把唯一可行的替代动作
+		// （永久删除，二次确认）摆到用户面前；没有专属 code 的话用户
+		// 只看到一个红框，下一步什么都做不了。
+		// 也不用 403：403 在 HTTP 语义里是"没登录/没权限"，而用户确实是
+		// 管理员，只是这块文件系统不让他这么删。
+		writeError(w, http.StatusUnprocessableEntity, "trash_unwritable", err.Error())
 	case errors.Is(err, filemgr.ErrExists):
 		// 409：前端按它弹"重命名建议 / 是否覆盖"，而不是把红字甩在脸上。
 		// 这也是 rename 唯一的护栏（Unix rename(2) 默认覆盖目标，D14 下

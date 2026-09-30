@@ -134,6 +134,17 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Get("/fs/zip", authed(handleFSZip(deps.Files)))
 			a.Post("/fs/mkdir", authed(handleFSMkdir(deps.Files)))
 			a.Post("/fs/rename", authed(handleFSRename(deps.Files)))
+			// 删除（移入各盘自己的回收站，或 permanent=true 永久删除）。
+			// 设计 17 节把删除归给了 jobs 异步队列，这里直接给同步端点：
+			// 回收站按盘分置后删除是一次同盘 rename(2)，瞬时完成，塞进
+			// 任务队列只会多一次"任务已提交"+轮询（详见 handlers_trash.go）。
+			a.Post("/fs/delete", authed(handleFSDelete(deps.Files)))
+			// 回收站。/fs/trash/empty 与 /fs/trash/{id}/restore 段数不同
+			// （3 vs 4），chi 不会串（同 /fs/upload/begin 的注意点）。
+			a.Get("/fs/trash", authed(handleFSTrashList(deps.Files)))
+			a.Post("/fs/trash/empty", authed(handleFSTrashEmpty(deps.Files)))
+			a.Post("/fs/trash/{id}/restore", authed(handleFSTrashRestore(deps.Files)))
+			a.Delete("/fs/trash/{id}", authed(handleFSTrashPurge(deps.Files)))
 			// 上传。/fs/upload/begin 与 /fs/upload/{uploadID} 都是 POST/DELETE
 			// 的同前缀路径，chi 静态段优先，但顺序写在前头让"begin 被
 			// {uploadID} 吃掉"这种错一眼可见（同 /commands/busy 的写法）。

@@ -316,38 +316,11 @@ func (s *Service) Delete(ctx context.Context, path string) (TrashItem, error) {
 	if err := ctx.Err(); err != nil {
 		return TrashItem{}, err
 	}
-	// 末段不解析：删一个符号链接要删链接本身，而不是它指向的文件
-	// （与 Rename 同一个道理，见 SplitResolved）。
-	dir, base, err := SplitResolved(path)
+	real, mount, st, err := s.deletable(path)
 	if err != nil {
 		return TrashItem{}, err
 	}
-	if base == "." || base == "/" {
-		return TrashItem{}, fmt.Errorf("%w: 不能删除 %q", ErrBadPath, path)
-	}
-	real := join(dir, base)
-
-	var st syscall.Stat_t
-	if err := syscall.Lstat(real, &st); err != nil {
-		// 报 fs.ErrNotExist（404）而不是"已移入回收站"：后者会让实现
-		// 建出一条指向虚空的条目，而还原它必然失败。
-		return TrashItem{}, fmt.Errorf("%w: %q", fs.ErrNotExist, real)
-	}
-	mount, err := s.fsRoot(real)
-	if err != nil {
-		return TrashItem{}, err
-	}
-	// 盘根是锚点：删了它等于这块盘"没了"，而它的回收站又建在它自己身上，
-	// 这个状态不能进入。
-	if real == mount {
-		return TrashItem{}, fmt.Errorf("%w: 不能删除挂载点 %q", ErrBadPath, mount)
-	}
-	trash := s.trashRoot(mount)
-	// 不许把回收站自己（或它里面的任何东西）丢进回收站：那会造出一条
-	// 自我包含的条目，遍历与还原都解不了，而它永远清不掉。
-	if real == trash || strings.HasPrefix(real, trash+string(os.PathSeparator)) {
-		return TrashItem{}, fmt.Errorf("%w: %q 已经在回收站里", ErrBadPath, real)
-	}
+	base := filepath.Base(real)
 
 	item := TrashItem{
 		Name: base, Origin: real, Mount: mount,
@@ -731,6 +704,99 @@ func removeEntry(e entryRef) error {
 	}
 	if err := os.Remove(e.metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("删除回收站元信息失败（%v）", err)
+	}
+	return nil
+}
+
+// DeleteMany 删除一批路径：permanent=false 移入各自盘的回收站，true 直接
+// 永久删除（盘根不可写时用户的唯一出路）。
+//
+// **先全部校验、再全部动手**：批次里只要有一个不存在/不合法，就整批不
+// 处理并回那个错误。部分成功是最坏结果 —— 界面上报了错，而实际上有些
+// 文件已经动了，用户无从知道到底哪几个受影响。先跑一遍 Lstat 把这个
+// 窗口关到"校验与执行之间恰好被别处删掉"那种真正的竞态（此时第二遍的
+// Delete 会报 ErrNotExist，那是无法在无锁下避免的，且极少见）。
+//
+// permanent 与进回收站是**两个**危险等级：前者不可撤销。但两者都在这
+// 里、都过同一套路径校验（末段不解析符号链接、拒绝删除回收站自身与
+// 挂载点），因为 permanent 去掉的只是"能不能还原"，不该顺带去掉其它
+// 任何一道护栏。
+func (s *Service) DeleteMany(ctx context.Context, paths []string, permanent bool) (int, error) {
+	if len(paths) == 0 {
+		return 0, fmt.Errorf("%w: 没有要删除的路径", ErrBadPath)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// 第一遍：把每条解析成确定路径并确认可删除（存在 + 不是回收站自身）。
+	targets := make([]string, 0, len(paths))
+	for _, p := range paths {
+		real, _, _, err := s.deletable(p)
+		if err != nil {
+			return 0, err
+		}
+		targets = append(targets, real)
+	}
+	n := 0
+	for _, t := range targets {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
+		var err error
+		if permanent {
+			err = s.removePermanent(t)
+		} else {
+			_, err = s.Delete(ctx, t)
+		}
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// deletable 把"这个路径能不能删"回答完，返回确定路径、所在盘与 stat。
+//
+// Delete 与 DeleteMany 都只调它：两处各写一份判定早晚会漂，而漂了的
+// 后果是批量接口把"整批拒绝"的陈诺偷换成"删到那条才失败"。
+//
+// 末段不解析符号链接（删链接要删链接本身，见 SplitResolved）。
+func (s *Service) deletable(p string) (real, mount string, st syscall.Stat_t, err error) {
+	dir, base, err := SplitResolved(p)
+	if err != nil {
+		return "", "", st, err
+	}
+	if base == "." || base == "/" {
+		return "", "", st, fmt.Errorf("%w: 不能删除 %q", ErrBadPath, p)
+	}
+	real = join(dir, base)
+	if err := syscall.Lstat(real, &st); err != nil {
+		// 报 fs.ErrNotExist（404）而不是"已移入回收站"：后者会让实现
+		// 建出一条指向虚空的条目，而还原它必然失败。
+		return "", "", st, fmt.Errorf("%w: %q", fs.ErrNotExist, real)
+	}
+	mount, err = s.fsRoot(real)
+	if err != nil {
+		return "", "", st, err
+	}
+	// 盘根是锚点：删了它等于这块盘"没了"，而它的回收站又建在它自己身上，
+	// 这个状态不能进入。
+	if real == mount {
+		return "", "", st, fmt.Errorf("%w: 不能删除挂载点 %q", ErrBadPath, mount)
+	}
+	// 不许把回收站自己（或它里面的任何东西）丢进回收站：那会造出一条
+	// 自我包含的条目，遍历与还原都解不了，而它永远清不掉。
+	if trash := s.trashRoot(mount); real == trash || strings.HasPrefix(real, trash+string(os.PathSeparator)) {
+		return "", "", st, fmt.Errorf("%w: %q 已经在回收站里", ErrBadPath, real)
+	}
+	return real, mount, st, nil
+}
+
+// removePermanent 永久删除一个已校验过的路径。
+func (s *Service) removePermanent(real string) error {
+	if err := os.RemoveAll(real); err != nil {
+		return fmt.Errorf("永久删除 %q 失败（%v）", real, err)
 	}
 	return nil
 }

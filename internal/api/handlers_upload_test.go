@@ -600,7 +600,7 @@ func TestUploadRequiresAuthAndCSRF(t *testing.T) {
 // 而"未知归 500"是排查远程故障时唯一能看到原始文本的地方。
 func TestUploadUnknownErrorMapsTo500(t *testing.T) {
 	boom := errors.New("某种没见过的内核错误")
-	h := newHarnessWith(t, func(d *api.AuthDeps) { d.Files = stubUpload{boom} })
+	h := newHarnessWith(t, func(d *api.AuthDeps) { d.Files = stubFiles{boom} })
 	res := h.do(http.MethodGet, "/api/fs/upload/x/status", true, "", "", "")
 	if res.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("未知错误应 500, got %d %s", res.StatusCode, readBody(t, res))
@@ -612,34 +612,6 @@ func TestUploadUnknownErrorMapsTo500(t *testing.T) {
 }
 
 // stubUpload 只把每个方法变成一个没见过的错误。
-type stubUpload struct{ err error }
-
-func (s stubUpload) List(context.Context, string, filemgr.ListOptions) (filemgr.ListPage, error) {
-	return filemgr.ListPage{}, s.err
-}
-func (s stubUpload) Stat(context.Context, string) (filemgr.Entry, error) {
-	return filemgr.Entry{}, s.err
-}
-func (s stubUpload) Mkdir(context.Context, string) error { return s.err }
-func (s stubUpload) Rename(context.Context, string, string) error {
-	return s.err
-}
-func (s stubUpload) Roots(context.Context) ([]filemgr.Root, error) { return nil, s.err }
-func (s stubUpload) Open(context.Context, string) (filemgr.Opened, error) {
-	return filemgr.Opened{}, s.err
-}
-func (s stubUpload) Zip(context.Context, []string, io.Writer) error { return s.err }
-func (s stubUpload) BeginUpload(context.Context, filemgr.UploadInit) (filemgr.UploadState, error) {
-	return filemgr.UploadState{}, s.err
-}
-func (s stubUpload) PutChunk(context.Context, filemgr.UploadChunk) (filemgr.UploadState, error) {
-	return filemgr.UploadState{}, s.err
-}
-func (s stubUpload) UploadStatus(context.Context, string) (filemgr.UploadState, error) {
-	return filemgr.UploadState{}, s.err
-}
-func (s stubUpload) AbortUpload(context.Context, string) error { return s.err }
-
 // ---------- 装配兜底 ----------
 
 // Files 没接时上传端点必须 501，不能 200 + 空。
