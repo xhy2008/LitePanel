@@ -206,7 +206,15 @@ func handleFSRename(svc Files) http.HandlerFunc {
 
 // writeFSError 把 filemgr 的领域错误翻成状态码。
 //
-// 顺序很重要：ErrBadPath / ErrNotDirectory 这些**自定义**错误内部会
+// ctx 取消必须在领域错误之前、且在 fs.ErrNotExist 之前判：批量删除跑到
+// 一半用户关掉标签页时，DeleteMany 回的就是 context.Canceled（领域层每条
+// 都查 ctx）。不映射会掉进 default 变 500 "文件系统操作失败" —— 而面板
+// 什么都没做错，是客户端自己走的；这个区分是反代日志里唯一能看出真相的
+// 地方。取值与 handlers_upload.go 对齐（499，nginx 的 "client closed
+// request"），两处同一个语义就该有同一个码。
+//
+// 顺序上仍排在领域哨兵**之后**：那些错误内部可能包着 syscall.Errno，
+// 而 context.Canceled 只在最外层出现，先判它不会误吞领域错误。
 // 包装 syscall 错误（fmt.Errorf("%w: ... (%v)")），如果先判 fs.ErrNotExist
 // 之类的底层哨兵，一个"穿过普通文件"的 ENOTDIR 会先撞上 fs.ErrNotExist
 // 分支被报成 404"文件不存在" —— 而用户看着那个文件在眼前，
@@ -236,6 +244,8 @@ func writeFSError(w http.ResponseWriter, err error) {
 		// 也不用 403：403 在 HTTP 语义里是"没登录/没权限"，而用户确实是
 		// 管理员，只是这块文件系统不让他这么删。
 		writeError(w, http.StatusUnprocessableEntity, "trash_unwritable", err.Error())
+	case errors.Is(err, context.Canceled):
+		writeError(w, 499, "canceled", "客户端已断开")
 	case errors.Is(err, filemgr.ErrExists):
 		// 409：前端按它弹"重命名建议 / 是否覆盖"，而不是把红字甩在脸上。
 		// 这也是 rename 唯一的护栏（Unix rename(2) 默认覆盖目标，D14 下

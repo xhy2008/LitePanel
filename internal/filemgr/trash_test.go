@@ -34,7 +34,9 @@ type trashEnv struct {
 	roots []string
 }
 
-func newTrashEnv(t *testing.T) *trashEnv {
+// newTrashEnv 接受 testing.TB 而不是 *testing.T：同一套夹具也要能被基准
+// 复用（"一批删除到底要多久"决定同步端点撑不撑得住，那只能量出来）。
+func newTrashEnv(t testing.TB) *trashEnv {
 	t.Helper()
 	base := t.TempDir()
 	real, err := filepath.EvalSymlinks(base)

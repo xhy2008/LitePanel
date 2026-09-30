@@ -11,6 +11,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -481,4 +482,22 @@ func TestDeleteTrashUnwritableMapsToCode(t *testing.T) {
 	if _, err := os.Lstat(p); err != nil {
 		t.Error("失败时源文件必须完好")
 	}
+}
+
+// 客户端断开（关标签页/锁屏）不该被报成"面板坏了"。
+//
+// 批量删除跑到一半用户关掉浏览器是常态，而 r.Context() 随之取消，DOMAIN
+// 层回 context.Canceled —— 没映射就是 500 "文件系统操作失败"。上传那边
+// 早就映射了 499（同 handlers_upload.go），文件操作这边漏了：面板没坏，
+// 是客户端自己走的，这个区分是反代日志与告警唯一能看出真相的地方。
+func TestDeleteCanceledMapsToClientGone(t *testing.T) {
+	h := newHarnessWith(t, func(d *api.AuthDeps) {
+		d.Files = stubFiles{fmt.Errorf("移入回收站: %w", context.Canceled)}
+	})
+	res := h.do("POST", "/api/fs/delete", true, csrf, `{"paths":["/data/a"]}`, "")
+	defer res.Body.Close()
+	if res.StatusCode != 499 {
+		t.Errorf("客户端断开应 499（与上传同一映射）, got %d", res.StatusCode)
+	}
+	assertErrorCode(t, res, "canceled")
 }
