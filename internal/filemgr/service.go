@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"litepanel/internal/metrics"
+	"litepanel/internal/store"
 )
 
 // Service 是文件管理的全部能力对外的入口（api.Files 的实现）。
@@ -22,6 +23,8 @@ type Service struct {
 	// 直接读它的话"roots 必须包含 /"这类断言会在某些机器上因为环境
 	// 恰好不合而变红，而那不是被测代码的错。
 	procDir string
+	// db 是 fs_jobs 的落库位置（见 Options.DB）。
+	db *store.DB
 
 	// uploadRoot 是分块暂存目录（面板自己的，绝不放进用户目录）。
 	uploadRoot string
@@ -55,6 +58,9 @@ type Service struct {
 // Options 是装配参数。零值可用（procDir 默认 "/proc"）。
 type Options struct {
 	ProcDir string
+	// DB 供后台任务队列落库（M6-T4）。nil = 队列不可用，相关方法明确
+	// 报错而不是静默丢任务 —— "提交成功但根本没在跑"比报错糟得多。
+	DB *store.DB
 	// DiskUsage 覆盖 statfs 实现（测试注入）。nil = 真实调用。
 	DiskUsage func(string) (diskUsage, error)
 
@@ -133,7 +139,7 @@ func NewService(opts Options) *Service {
 		retain = maxTrashRetain
 	}
 	svc := &Service{
-		procDir: dir, usage: usage,
+		procDir: dir, db: opts.DB, usage: usage,
 		uploadRoot: opts.UploadRoot, uploadTTL: ttl,
 		maxChunk: maxChunk, maxUpload: maxUpload, clock: clock,
 		trashDirName: trashName, trashRetain: retain,

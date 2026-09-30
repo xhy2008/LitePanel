@@ -1,0 +1,477 @@
+package filemgr
+
+// 后台文件任务（设计 8.4 / M6-T4）—— 持久层与状态机。
+//
+// 存在的理由：复制/移动/删除的工作量随一个**用户可控且无上限**的量增长
+// （字节数 / 条目数 / 目录树深度），而同步 HTTP 端点的 r.Context() 会随
+// 关标签页、锁屏、代理超时取消，任务就地停住（实测中断时原地剩
+// 2999/3000，而前端只看到一个网络错误）。设计第 18 行与验收项都要"不因
+// 浏览器关闭而中断"，所以执行方必须是守护进程：先落库拿 id， **worker 池
+// 异步跑，进度经 WS 推**。
+//
+// 本文件只管"任务在盘上的样子"：建、读、原子领取、进度、终态、重启对账。
+// 执行与 worker 池在 queue.go。claim/progress/finish 一律不导出 —— 队列
+// 若能被 HTTP 层调用，"谁决定任务在跑"就有了第二个主人。
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// maxJobHistory 是列表里终态（done/failed/canceled/interrupted）任务的上限。
+//
+// 每次删除都留一行，跑一年就是几万条：抽屉一次拉全量会拖慢首屏，而用户
+// 只看最近几条。进行中的任务不受此限（见 ListJobs）—— 一个排在几万条
+// 之前的长任务若被历史挤掉，会从界面上消失，而它其实还在跑。
+const maxJobHistory = 100
+
+// JobOp 是任务类型。只有三种，比设计 598 行的枚举窄（理由见 0006 迁移）：
+// upload 有自己的可续传协议，rename/mkdir/zip 工作量有界，做成任务只会给
+// UI 多加一次"已提交 + 轮询"。
+type JobOp string
+
+const (
+	OpCopy   JobOp = "copy"
+	OpMove   JobOp = "move"
+	OpDelete JobOp = "delete"
+)
+
+func (o JobOp) valid() bool {
+	switch o {
+	case OpCopy, OpMove, OpDelete:
+		return true
+	}
+	return false
+}
+
+// JobState 是任务状态（设计 8.4 的状态机）。
+type JobState string
+
+const (
+	JobPending     JobState = "pending"
+	JobRunning     JobState = "running"
+	JobDone        JobState = "done"
+	JobFailed      JobState = "failed"
+	JobCanceled    JobState = "canceled"
+	JobInterrupted JobState = "interrupted"
+)
+
+// terminal 报告该状态是否已终态（不再有 worker 会动它）。
+func (s JobState) terminal() bool {
+	switch s {
+	case JobDone, JobFailed, JobCanceled, JobInterrupted:
+		return true
+	}
+	return false
+}
+
+// 任务层的哨兵错误。HTTP 层用 errors.Is 判，绝不对错误文本做中文子串匹配
+// （改文案会把 404 变成 500）。
+var (
+	// ErrNoJob 指定 id 不存在（404）。
+	ErrNoJob = errors.New("任务不存在")
+	// ErrJobNotCancellable 任务已进终态，取消无从谈起（409）。
+	// 不能静默成功：那等于谎报"已中止"，而任务其实早跑完了。
+	ErrJobNotCancellable = errors.New("任务已结束，无法取消")
+	// ErrJobInput 建任务的入参不合法（400）。
+	ErrJobInput = errors.New("任务参数不合法")
+	// ErrNoDB 面板没接数据库，队列不可用。
+	ErrNoDB = errors.New("任务队列未接数据库")
+)
+
+// Job 是一个后台任务。
+type Job struct {
+	ID           int64    `json:"id"`
+	Op           JobOp    `json:"op"`
+	Src          []string `json:"src"`
+	Dst          string   `json:"dst"`
+	TotalBytes   int64    `json:"total_bytes"`
+	DoneBytes    int64    `json:"done_bytes"`
+	EntriesTotal int      `json:"entries_total"`
+	EntriesDone  int      `json:"entries_done"`
+	State        JobState `json:"state"`
+	// CancelRequested 是"用户点了取消但 worker 还没落地"。它必须落盘：
+	// 否则面板在任务排队时崩掉，重启后队列会把用户已明确取消的删除真做掉。
+	CancelRequested bool   `json:"cancel_requested"`
+	Error           string `json:"error,omitempty"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
+}
+
+// JobInput 是建任务入参。
+type JobInput struct {
+	Op  JobOp
+	Src []string
+	Dst string
+}
+
+// normalized 去重源路径、填默认、校验。
+//
+// 去重必须在**入库前**：前端"全选 + 手点两下"很容易交出重复项，而重复源
+// 会让同一个文件被处理两次 —— copy 得到一次"目标已存在"的假失败，delete
+// 第二次必然 404，用户明明只点了一次删除却看到一条红色报错。
+func (in JobInput) normalized() (JobInput, error) {
+	out := in
+	if !out.Op.valid() {
+		return in, fmt.Errorf("%w: 未知操作 %q", ErrJobInput, out.Op)
+	}
+	seen := make(map[string]bool, len(out.Src))
+	src := make([]string, 0, len(out.Src))
+	for _, p := range out.Src {
+		if p == "" {
+			return in, fmt.Errorf("%w: 源路径里有空值", ErrJobInput)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		src = append(src, p)
+	}
+	if len(src) == 0 {
+		return in, fmt.Errorf("%w: 没有源路径", ErrJobInput)
+	}
+	out.Src = src
+	// delete 没有目标；copy/move 必须有，否则 worker 取到只能立刻失败，
+	// 用户在抽屉里看到的是"一条平白无故失败的记录"，比一个 400 难懂。
+	if out.Op == OpDelete {
+		out.Dst = ""
+	} else if strings.TrimSpace(out.Dst) == "" {
+		return in, fmt.Errorf("%w: %s 需要目标路径", ErrJobInput, out.Op)
+	}
+	return out, nil
+}
+
+// JobFilter 是列举过滤。零值 = 全部。
+type JobFilter struct {
+	State JobState
+}
+
+// CreateJob 校验入参并落库，回一条 pending 任务（设计 115 行：立即落库
+// + 返回 job_id）。
+func (s *Service) CreateJob(ctx context.Context, in JobInput) (Job, error) {
+	if err := ctx.Err(); err != nil {
+		return Job{}, err
+	}
+	db, err := s.jobDB()
+	if err != nil {
+		return Job{}, err
+	}
+	in, err = in.normalized()
+	if err != nil {
+		return Job{}, err
+	}
+	src, err := json.Marshal(in.Src)
+	if err != nil {
+		return Job{}, err
+	}
+	now := s.clock().Unix()
+	var dst any
+	if in.Dst != "" {
+		dst = in.Dst
+	}
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO fs_jobs(op,src,dst,entries_total,state,created_at,updated_at)
+		 VALUES(?,?,?,?,?,?,?)`,
+		string(in.Op), string(src), dst, len(in.Src), string(JobPending), now, now)
+	if err != nil {
+		return Job{}, fmt.Errorf("写入任务: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Job{}, fmt.Errorf("读任务 id: %w", err)
+	}
+	return s.GetJob(ctx, id)
+}
+
+// GetJob 按 id 读一条。
+func (s *Service) GetJob(ctx context.Context, id int64) (Job, error) {
+	db, err := s.jobDB()
+	if err != nil {
+		return Job{}, err
+	}
+	return scanJob(db.QueryRowContext(ctx, jobSelect+` WHERE id=?`, id))
+}
+
+// jobSelect 是共用的读列。列名与顺序必须和 scanJob 一一对上，所以只写
+// 一份：两处各列一遍，加列时漏一处会得到错位的数据而不是报错。
+const jobSelect = `SELECT id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
+	state,cancel_requested,COALESCE(error,''),created_at,updated_at FROM fs_jobs`
+
+// ListJobs 列举：进行中的**全部** + 最近 maxJobHistory 条终态。
+//
+// 顺序按 id 倒序（刚提交的在顶上）。执行顺序是相反的 FIFO —— 两者必须
+// 各自是自己的顺序，"顺手复用同一条 SQL"会让其中一个悄悄变形。
+//
+// 不能简单 `ORDER BY id DESC LIMIT n`：那样一个跑了很久、排在 n 条之前的
+// 任务会从界面上消失，而它还在跑 —— 用户以为它没了，这是最难排查的一类
+// "任务不见了"。
+func (s *Service) ListJobs(ctx context.Context, f JobFilter) ([]Job, error) {
+	db, err := s.jobDB()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	q := jobSelect + `
+		WHERE (? = '' OR state = ?)
+		  AND (state IN ('pending','running') OR id IN (
+		        SELECT id FROM fs_jobs WHERE state NOT IN ('pending','running')
+		        ORDER BY id DESC LIMIT ?))
+		ORDER BY id DESC`
+	rows, err := db.QueryContext(ctx, q, string(f.State), string(f.State), maxJobHistory)
+	if err != nil {
+		return nil, fmt.Errorf("读任务列表: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Job, 0, 8)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ReconcileJobs 重启对账，返回改动的条数。
+//
+// running → interrupted：进程死了就是死了，那个 copy 到底复制了几个字节
+// 只有上辈子的内存知道。留成 running 会让抽屉永远显示"进行中"，用户等不
+// 到结果；直接重跑又可能留下半份目标 —— 所以停在这里等用户点重试。
+//
+// pending 且带取消意图 → canceled：这是"取消意图必须落盘"的另一半，光存
+// 不用等于没存 —— 否则重启后这个用户已经说"别做"的 delete 会被真做掉。
+//
+// 普通 pending 保持不动（会继续跑），终态一律不碰。
+func (s *Service) ReconcileJobs(ctx context.Context) (int, error) {
+	db, err := s.jobDB()
+	if err != nil {
+		return 0, err
+	}
+	now := s.clock().Unix()
+	var n int
+	r, err := db.ExecContext(ctx,
+		`UPDATE fs_jobs SET state='interrupted', updated_at=? WHERE state='running'`, now)
+	if err != nil {
+		return 0, fmt.Errorf("对账 running 任务: %w", err)
+	}
+	c, _ := r.RowsAffected()
+	n += int(c)
+	r, err = db.ExecContext(ctx,
+		`UPDATE fs_jobs SET state='canceled', updated_at=?
+		 WHERE state='pending' AND cancel_requested=1`, now)
+	if err != nil {
+		return n, fmt.Errorf("对账已取消的排队任务: %w", err)
+	}
+	c, _ = r.RowsAffected()
+	n += int(c)
+	return n, nil
+}
+
+// RequestCancelJob 记录取消意图；正在跑的任务另由 worker 的 cancelFunc
+// 打断（queue.go 负责持有那个函数）。
+//
+// 意图落库而不是只调用 cancelFunc：任务此刻可能还在排队（没有 cancelFunc
+// 可调），也可能在面板崩掉之后才轮到执行。
+func (s *Service) RequestCancelJob(ctx context.Context, id int64) error {
+	db, err := s.jobDB()
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := s.clock().Unix()
+	res, err := db.ExecContext(ctx,
+		`UPDATE fs_jobs SET cancel_requested=1, updated_at=?
+		 WHERE id=? AND state IN ('pending','running')`, now, id)
+	if err != nil {
+		return fmt.Errorf("记录取消: %w", err)
+	}
+	if c, _ := res.RowsAffected(); c == 1 {
+		return nil
+	}
+	// 没改动任何行：要么没这个 id，要么已终态。两者都要能区分出来 ——
+	// 对已完成的谎报"已取消"是最坏的一种友好。
+	j, err := s.GetJob(ctx, id)
+	if err != nil {
+		return err
+	}
+	if j.CancelRequested {
+		return nil // 重复取消：幂等，不报错
+	}
+	return fmt.Errorf("%w: %s", ErrJobNotCancellable, j.State)
+}
+
+// claimJob 原子地领一个待办任务（FIFO）。没有待办回 sql.ErrNoRows。
+//
+// 用一条 `UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING` 而不是
+// "先 SELECT 再 UPDATE"：后者是两个语句，并发数 2 时两个 worker 会领到
+// 同一个任务，于是同一批文件被处理两遍（copy 得到一次假的"目标已存在"，
+// delete 第二次必然 404）。单条语句由 SQLite 自己串行化，无需事务。
+//
+// 顺带在同一句里把"带取消意图"的任务直接落成 canceled：排队期间用户点了
+// 取消，轮到它时就不该被执行，而这两件事必须在同一个原子动作里 —— 分两步
+// 的话中间崩一次，重启后就要靠对账来猜。
+func (s *Service) claimJob(ctx context.Context) (Job, error) {
+	db, err := s.jobDB()
+	if err != nil {
+		return Job{}, err
+	}
+	now := s.clock().Unix()
+	var j Job
+	var src, dst, state sql.NullString
+	var eerr sql.NullString
+	err = db.QueryRowContext(ctx,
+		`UPDATE fs_jobs
+		 SET state = CASE WHEN cancel_requested=1 THEN 'canceled' ELSE 'running' END,
+		     updated_at = ?
+		 WHERE id = (SELECT id FROM fs_jobs WHERE state='pending' ORDER BY id LIMIT 1)
+		 RETURNING `+jobReturningCols, now).
+		Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
+			&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested,
+			&eerr, &j.CreatedAt, &j.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return Job{}, fmt.Errorf("领取任务: %w", err)
+	}
+	j.State = JobState(state.String)
+	j.Src, err = decodeSrc(src.String)
+	if err != nil {
+		return Job{}, err
+	}
+	j.Dst = dst.String
+	j.Error = eerr.String
+	return j, nil
+}
+
+// jobReturningCols 是 jobSelect 的列清单在 RETURNING 里的形态。
+// 与 jobSelect 同一批列、同一顺序（共用 scan 顺序）。
+const jobReturningCols = `id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
+	state,cancel_requested,COALESCE(error,''),created_at,updated_at`
+
+// setJobProgress 写进度。节流策略在执行侧（设计：每 200ms 或每 4MB），
+// 这里只负责"写了就能读到"。
+func (s *Service) setJobProgress(ctx context.Context, id int64, doneBytes int64, entriesDone int) error {
+	db, err := s.jobDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`UPDATE fs_jobs SET done_bytes=?, entries_done=?, updated_at=? WHERE id=?`,
+		doneBytes, entriesDone, s.clock().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("写任务进度: %w", err)
+	}
+	return nil
+}
+
+// finishJob 写终态。
+//
+// 带取消意图的任务即使 worker 正常返回也记 canceled：worker 在块边界看到
+// 取消后清理半成品、然后返回 nil，如果这里照单写 done，用户在抽屉里看到
+// "已完成"而实际文件只删了一半 —— 这种"看起来成功了"的假失败最危险。
+func (s *Service) finishJob(ctx context.Context, id int64, st JobState, reason string) error {
+	db, err := s.jobDB()
+	if err != nil {
+		return err
+	}
+	if !st.terminal() {
+		return fmt.Errorf("finishJob 只能写终态, got %q", st)
+	}
+	now := s.clock().Unix()
+	var res sql.Result
+	if st == JobDone {
+		res, err = db.ExecContext(ctx,
+			`UPDATE fs_jobs SET state=?, updated_at=? WHERE id=? AND cancel_requested=0`,
+			string(JobDone), now, id)
+		if err != nil {
+			return fmt.Errorf("写任务终态: %w", err)
+		}
+		if c, _ := res.RowsAffected(); c == 0 {
+			// 要么任务被取消了（那就转 canceled），要么没了（那就没什么可写）
+			_, err = db.ExecContext(ctx,
+				`UPDATE fs_jobs SET state=?, updated_at=? WHERE id=? AND cancel_requested=1`,
+				string(JobCanceled), now, id)
+			return err
+		}
+		return nil
+	}
+	var e any
+	if reason != "" {
+		e = reason
+	}
+	_, err = db.ExecContext(ctx,
+		`UPDATE fs_jobs SET state=?, error=?, updated_at=? WHERE id=?`,
+		string(st), e, now, id)
+	if err != nil {
+		return fmt.Errorf("写任务终态: %w", err)
+	}
+	return nil
+}
+
+// jobDB 取底层句柄。每个方法开头判一次而不是在建 Service 时 panic：
+// 文件管理的其余能力（浏览/上传/回收站）不需要数据库，队列没接不该
+// 让整包不可用。
+func (s *Service) jobDB() (*sql.DB, error) {
+	if s.db == nil {
+		return nil, ErrNoDB
+	}
+	return s.db.SqlDB(), nil
+}
+
+// rowScanner 让 scanJob 同时吃 QueryRow 与 Rows。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(r rowScanner) (Job, error) {
+	var (
+		j     Job
+		src   sql.NullString
+		dst   sql.NullString
+		state sql.NullString
+		eerr  sql.NullString
+	)
+	if err := r.Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
+		&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested,
+		&eerr, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Job{}, fmt.Errorf("%w", ErrNoJob)
+		}
+		return Job{}, fmt.Errorf("读任务: %w", err)
+	}
+	j.State = JobState(state.String)
+	j.Dst = dst.String
+	j.Error = eerr.String
+	var err error
+	if j.Src, err = decodeSrc(src.String); err != nil {
+		return Job{}, err
+	}
+	return j, nil
+}
+
+// decodeSrc 解源路径数组。坏 JSON 不当"没有源"处理：那会让一个数据损坏的
+// 任务被当成空任务展示（用户看到一条"0 个文件"的记录），而实际原因永远
+// 没人知道。
+func decodeSrc(raw string) ([]string, error) {
+	if raw == "" {
+		return []string{}, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("任务源路径已损坏: %w", err)
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
+}
