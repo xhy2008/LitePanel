@@ -121,6 +121,10 @@ func main() {
 	janitorCtx, janitorCancel := context.WithCancel(context.Background())
 	defer janitorCancel()
 	startUploadJanitor(janitorCtx, deps, uploadJanitorInterval)
+	// 回收站过期清理（设计 8.6）。同一个 ctx、同一个节奏：两者都是
+	// "扫一个目录、按时间判死活、删"，分两个唤醒时刻只会让"面板在后台
+	// 干活"这件事多出第二个没人说得出理由的时间点。
+	startTrashJanitor(janitorCtx, deps, trashJanitorInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
