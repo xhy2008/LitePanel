@@ -184,6 +184,9 @@ func (s *Service) CreateJob(ctx context.Context, in JobInput) (Job, error) {
 	if err != nil {
 		return Job{}, fmt.Errorf("读任务 id: %w", err)
 	}
+	// 唤醒 worker 立刻来取（不等兜底 tick）。少了这一脚，刚提交的
+	// 任务会干等一个轮询周期，界面上就是"按下复制、排队中转圈转半天"。
+	s.kick()
 	return s.GetJob(ctx, id)
 }
 
@@ -295,6 +298,11 @@ func (s *Service) RequestCancelJob(ctx context.Context, id int64) error {
 		return fmt.Errorf("记录取消: %w", err)
 	}
 	if c, _ := res.RowsAffected(); c == 1 {
+		// 意图落了库，还要打断正在跑的那一个（若在跑）。只记 flag 等
+		// worker 自己发现也行，但一个 10GB 的复制要几十分钟，而用户点
+		// 取消是在他意识到"选错了"的那一刻。排队中的没有 goroutine 可
+		// 打断，那种情况由 claimJob 的 CASE 兜住。
+		s.cancelRunning(id)
 		return nil
 	}
 	// 没改动任何行：要么没这个 id，要么已终态。两者都要能区分出来 ——

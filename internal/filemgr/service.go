@@ -25,6 +25,33 @@ type Service struct {
 	procDir string
 	// db 是 fs_jobs 的落库位置（见 Options.DB）。
 	db *store.DB
+	// jobConcurrency / executor 见 Options 同名项。
+	jobConcurrency int
+	executor       jobExecutor
+	// progressObserver 是进度落库次数的钩子（只有测试用）。节流是这条
+	// 路径上唯一的性能护栏，而它的效果不能用"过了多久"断言（墙钟在负载
+	// 高的机器上会漂），只能数次数。
+	progressObserver func()
+	// wakeInterval 是没有唤醒信号时的兜底轮询周期。导出给测试拉长，
+	// 好把"靠 tick 也能跑"与"提交后立刻跑"区分开。
+	wakeInterval time.Duration
+	// wake 让新提交的任务立刻被 worker 取走；缓冲 1，非阻塞投递。
+	wake chan struct{}
+
+	// jobsWG 统计正在跑的 worker，关停时要等它们把状态写清楚。
+	jobsWG sync.WaitGroup
+	// runningCancel 保存每个在跑任务的取消函数（按任务 id）。
+	runningMu     sync.Mutex
+	runningCancel map[int64]context.CancelFunc
+	// poolMu / poolStarted 保证重复 StartJobs 不起两套 worker：
+	// 两套会把并发上限翻倍，而配置文件里的"并发 2"是用户唯一能看到的数字。
+	poolMu sync.Mutex
+	// jobsCtx 是池的父上下文，也是"关停"与"用户取消"的唯一区分依据：
+	// 它被取消 = 面板在退出，任务落成 interrupted；只有任务自己的 ctx
+	// 被取消 = 用户点的取消，落成 canceled。两者混成一个的话，一次正常
+	// 重启就会把用户没取消过的删除记成"已取消"。
+	jobsCtx     context.Context
+	poolStarted bool
 
 	// uploadRoot 是分块暂存目录（面板自己的，绝不放进用户目录）。
 	uploadRoot string
@@ -75,6 +102,16 @@ type Options struct {
 	// Clock 注入时间。nil = time.Now。
 	Clock func() time.Time
 
+	// JobConcurrency 是后台任务的并发上限，零值 = DefaultJobConcurrency
+	// （设计 8.4：默认 2）。
+	JobConcurrency int
+	// JobExecutor 覆盖任务的实际执行体，nil = 用内置的 copy/move/delete。
+	//
+	// 必须有注入点：池的语义（并发上限、取消传递、关停对账、进度节流）
+	// 需要一个能被卡住的任务才测得准，而真实复制在本机是几百微秒量级 ——
+	// 拿真操作测池，等于只能在"睡多久"上赌时间。
+	JobExecutor func(ctx context.Context, j Job, report progressFunc) error
+
 	// TrashDirName 覆盖各盘根目录下的回收站目录名，空 = DefaultTrashDirName。
 	TrashDirName string
 	// TrashRetain 覆盖回收站保留期，零值 = DefaultTrashRetain。
@@ -89,6 +126,9 @@ type Options struct {
 	// 会污染用户目录，而 CI/目标机的盘数更不确定 —— 那种测试会在某些
 	// 机器上悄悄什么都不测。注入之后夹具可以任意虚构盘数。
 	FilesystemRoot func(path string) (string, error)
+	// JobWakeInterval 覆盖没有唤醒信号时的兜底轮询周期，零值 = 默认。
+	// 只有测试会改它（拉长它才能证明"提交后立刻跑"不是靠轮询兜的）。
+	JobWakeInterval time.Duration
 	// TrashRoots 覆盖"要管哪些盘"（列举/清理/清空要遍历所有盘）。
 	// nil = 从挂载表枚举真实盘。理由与 FilesystemRoot 同样：真实盘数
 	// 取决于跑测试的机器，不注入的话"跨盘列举"会在某些机器上悄悄
@@ -122,6 +162,14 @@ func NewService(opts Options) *Service {
 	if maxUpload <= 0 {
 		maxUpload = DefaultMaxUploadBytes
 	}
+	concurrency := opts.JobConcurrency
+	if concurrency <= 0 {
+		concurrency = DefaultJobConcurrency
+	}
+	wakeInterval := opts.JobWakeInterval
+	if wakeInterval <= 0 {
+		wakeInterval = defaultJobWakeInterval
+	}
 	trashName := opts.TrashDirName
 	if trashName == "" {
 		trashName = DefaultTrashDirName
@@ -140,6 +188,8 @@ func NewService(opts Options) *Service {
 	}
 	svc := &Service{
 		procDir: dir, db: opts.DB, usage: usage,
+		jobConcurrency: concurrency, wakeInterval: wakeInterval,
+		wake: make(chan struct{}, 1), runningCancel: map[int64]context.CancelFunc{},
 		uploadRoot: opts.UploadRoot, uploadTTL: ttl,
 		maxChunk: maxChunk, maxUpload: maxUpload, clock: clock,
 		trashDirName: trashName, trashRetain: retain,
@@ -148,6 +198,13 @@ func NewService(opts Options) *Service {
 	// 盘的枚举要读挂载表，而挂载表的位置（procDir）在 Service 上，
 	// 所以这一项只能在结构体建好之后接（不像 fsRoot 那样是个纯函数）。
 	// 接不上真实实现就会漏掉"一个真盘都没枚举到时兜底 /"那段逻辑。
+	// 执行器：注入的用注入的，否则用内置的 copy/move/delete。内置那套
+	// 是 svc 上的方法，只能在 svc 建好之后接。
+	if opts.JobExecutor != nil {
+		svc.executor = opts.JobExecutor
+	} else {
+		svc.executor = svc.runJob
+	}
 	if opts.TrashRoots != nil {
 		svc.trashRoots = opts.TrashRoots
 	} else {
