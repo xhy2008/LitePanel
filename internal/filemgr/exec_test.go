@@ -22,10 +22,6 @@ import (
 
 // ---------- 夹具 ----------
 
-// nopProgress 是"不关心进度"的占位回调。queue.go 里的 progressFunc 允许
-// 任何签名的函数，实现里也不希望在每处调用前判 nil。
-func nopProgress(int64, int) error { return nil }
-
 // varTempDir 是一个一定可写的临时目录（EvalSymlinks 过，所以拼出来的路径
 // 与 os 自己看到的是同一串 —— 本机 /data 上 /tmp 是个符号链接，不解析会
 // 让"路径相等"的断言莫名失败）。

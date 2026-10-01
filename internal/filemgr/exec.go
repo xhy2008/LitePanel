@@ -52,6 +52,11 @@ const copyBufferSize = 1 << 20
 // 取消反应更快（一个 10GB 文件的 sha256 要跑几分钟）。
 const verifyHashChunk = 1 << 20
 
+// nopProgress 是"不关心进度"的占位回调。progressFunc 的调用方（copyFile /
+// movePath 等）在调用点不判 nil，所以需要一个真的空函数，而不是每个入口
+// 都写一遍 `if report == nil { ... }`。
+func nopProgress(int64, int) error { return nil }
+
 // ---------- 流式复制内核 ----------
 
 // copyStream 把 src 流式拷到 dst，返回已写字节数。

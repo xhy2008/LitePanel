@@ -74,6 +74,10 @@ type Service struct {
 	fsRoot rootFunc
 	// trashRoots 枚举要管哪些盘（见 Options.TrashRoots）。
 	trashRoots trashRootsFunc
+	// sameFS 判两个路径是否同一文件系统（见 Options.SameFS）。
+	sameFS sameFSFunc
+	// moveHooks 只有测试用（见 moveHooks）。生产永远为 nil。
+	moveHooks *moveHooks
 
 	// uploadMu 串行化同一会话元信息的读改写。分块各写各的文件、互不
 	// 相干（并发上传数默认 3），所以锁只保护 meta.json 这一小块。
@@ -134,6 +138,14 @@ type Options struct {
 	// 取决于跑测试的机器，不注入的话"跨盘列举"会在某些机器上悄悄
 	// 只覆盖一个盘，测试照样绿而什么都没测。
 	TrashRoots func(ctx context.Context) ([]string, error)
+	// SameFS 覆盖"两个路径是不是同一文件系统"的判定，nil = 比设备号。
+	//
+	// 移动的执行路径完全由这个布尔决定（同盘 rename vs copying + 校验 +
+	// 删源），而这两者的失败方式相反：前者失败不会丢数据，后者做错一步
+	// 就是不可逆的。必须能在**任何机器上**把两条路都跑起来测——本机只有
+	// 一个可写文件系统，注入之后两条路都跑的是真文件操作，只有"是不是
+	// 跨盘"这个判定来自夹具。
+	SameFS func(a, b string) (bool, error)
 }
 
 // NewService 装配文件管理服务。
@@ -194,6 +206,7 @@ func NewService(opts Options) *Service {
 		maxChunk: maxChunk, maxUpload: maxUpload, clock: clock,
 		trashDirName: trashName, trashRetain: retain,
 		fsRoot: rootFinder(opts.FilesystemRoot),
+		sameFS: sameFSFinder(opts.SameFS),
 	}
 	// 盘的枚举要读挂载表，而挂载表的位置（procDir）在 Service 上，
 	// 所以这一项只能在结构体建好之后接（不像 fsRoot 那样是个纯函数）。
