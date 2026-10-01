@@ -722,6 +722,15 @@ func removeEntry(e entryRef) error {
 // 挂载点），因为 permanent 去掉的只是"能不能还原"，不该顺带去掉其它
 // 任何一道护栏。
 func (s *Service) DeleteMany(ctx context.Context, paths []string, permanent bool) (int, error) {
+	return s.deleteMany(ctx, paths, permanent, nopProgress)
+}
+
+// deleteMany 是 DeleteMany 的可上报进度内核（job 执行器要走这条路）。
+//
+// 拆两层而不是给 DeleteMany 加个可选参数：删除五千个文件要一分多钟，队列
+// 必须能报"已删 1200/5000"，否则界面是一个几分钟不动的进度条，用户只会
+// 以为面板挂了。同步调用方（HTTP 旧路径）传 nopProgress，行为一字不差。
+func (s *Service) deleteMany(ctx context.Context, paths []string, permanent bool, report progressFunc) (int, error) {
 	if len(paths) == 0 {
 		return 0, fmt.Errorf("%w: 没有要删除的路径", ErrBadPath)
 	}
@@ -752,6 +761,12 @@ func (s *Service) DeleteMany(ctx context.Context, paths []string, permanent bool
 			return n, err
 		}
 		n++
+		// 传**累计**条目数 n 而不是 1：progressFunc 的约定是累计值，
+		// 节流器拿它跟上次做差。传 1 会让 pendEntries 永远是 1，
+		// 抽屉里的"已删 N"卡在一动不动。
+		if err := report(0, n); err != nil {
+			return n, err
+		}
 	}
 	return n, nil
 }

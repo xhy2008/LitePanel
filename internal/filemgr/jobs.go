@@ -96,10 +96,15 @@ type Job struct {
 	State        JobState `json:"state"`
 	// CancelRequested 是"用户点了取消但 worker 还没落地"。它必须落盘：
 	// 否则面板在任务排队时崩掉，重启后队列会把用户已明确取消的删除真做掉。
-	CancelRequested bool   `json:"cancel_requested"`
-	Error           string `json:"error,omitempty"`
-	CreatedAt       int64  `json:"created_at"`
-	UpdatedAt       int64  `json:"updated_at"`
+	CancelRequested bool `json:"cancel_requested"`
+	// Permanent 只对 delete 有意义：true = 直接永久删除、不进回收站。
+	// 与 cancel_requested 同类——都是"用户已做出的、不可从盘上重新推断的
+	// 决定"，必须落盘（理由见 0007 迁移：排队中崩了，重启不能把永久
+	// 删除偷换成可还原，也不能反过来吃掉唯一的后悔药）。
+	Permanent bool   `json:"permanent"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
 // JobInput 是建任务入参。
@@ -107,6 +112,9 @@ type JobInput struct {
 	Op  JobOp
 	Src []string
 	Dst string
+	// Permanent 只对 delete 生效（见 Job.Permanent）；其他 op 会被
+	// normalized 强制归零，避免"copy 带了个 permanent=1"这种无意义组合。
+	Permanent bool
 }
 
 // normalized 去重源路径、填默认、校验。
@@ -142,6 +150,11 @@ func (in JobInput) normalized() (JobInput, error) {
 	} else if strings.TrimSpace(out.Dst) == "" {
 		return in, fmt.Errorf("%w: %s 需要目标路径", ErrJobInput, out.Op)
 	}
+	// permanent 只对 delete 有意义：其他 op 带个 permanent=1 是个无意义组合，
+	// 归零而不是报错（它不危险，只是垃圾数据）。
+	if out.Op != OpDelete {
+		out.Permanent = false
+	}
 	return out, nil
 }
 
@@ -173,10 +186,18 @@ func (s *Service) CreateJob(ctx context.Context, in JobInput) (Job, error) {
 	if in.Dst != "" {
 		dst = in.Dst
 	}
+	// 列是 INTEGER NOT NULL DEFAULT 0，所以显式转成 0/1 而不是传 bool 指望
+	// 驱动顺手转：驱动行为是外部实现细节，而这一列的真假决定"要不要给
+	// 用户留后悔药"。
+	perm := 0
+	if in.Permanent {
+		perm = 1
+	}
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO fs_jobs(op,src,dst,entries_total,state,created_at,updated_at)
-		 VALUES(?,?,?,?,?,?,?)`,
-		string(in.Op), string(src), dst, len(in.Src), string(JobPending), now, now)
+		`INSERT INTO fs_jobs(op,src,dst,entries_total,permanent,state,created_at,updated_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		string(in.Op), string(src), dst, len(in.Src), perm,
+		string(JobPending), now, now)
 	if err != nil {
 		return Job{}, fmt.Errorf("写入任务: %w", err)
 	}
@@ -202,7 +223,7 @@ func (s *Service) GetJob(ctx context.Context, id int64) (Job, error) {
 // jobSelect 是共用的读列。列名与顺序必须和 scanJob 一一对上，所以只写
 // 一份：两处各列一遍，加列时漏一处会得到错位的数据而不是报错。
 const jobSelect = `SELECT id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
-	state,cancel_requested,COALESCE(error,''),created_at,updated_at FROM fs_jobs`
+	state,cancel_requested,permanent,COALESCE(error,''),created_at,updated_at FROM fs_jobs`
 
 // ListJobs 列举：进行中的**全部** + 最近 maxJobHistory 条终态。
 //
@@ -343,7 +364,7 @@ func (s *Service) claimJob(ctx context.Context) (Job, error) {
 		 WHERE id = (SELECT id FROM fs_jobs WHERE state='pending' ORDER BY id LIMIT 1)
 		 RETURNING `+jobReturningCols, now).
 		Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
-			&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested,
+			&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent,
 			&eerr, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, sql.ErrNoRows
@@ -364,7 +385,7 @@ func (s *Service) claimJob(ctx context.Context) (Job, error) {
 // jobReturningCols 是 jobSelect 的列清单在 RETURNING 里的形态。
 // 与 jobSelect 同一批列、同一顺序（共用 scan 顺序）。
 const jobReturningCols = `id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
-	state,cancel_requested,COALESCE(error,''),created_at,updated_at`
+	state,cancel_requested,permanent,COALESCE(error,''),created_at,updated_at`
 
 // setJobProgress 写进度。节流策略在执行侧（设计：每 200ms 或每 4MB），
 // 这里只负责"写了就能读到"。
@@ -450,7 +471,7 @@ func scanJob(r rowScanner) (Job, error) {
 		eerr  sql.NullString
 	)
 	if err := r.Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
-		&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested,
+		&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent,
 		&eerr, &j.CreatedAt, &j.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, fmt.Errorf("%w", ErrNoJob)

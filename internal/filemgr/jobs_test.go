@@ -641,6 +641,11 @@ func TestJobsSchemaAndConstraints(t *testing.T) {
 			 VALUES('delete','["/a"]',1,'paused',1,1)`, false},
 		{"改状态成非法值也被拒",
 			`UPDATE fs_jobs SET state='paused' WHERE op='delete'`, false},
+		// permanent 是"用户已做出的、不可从盘上重新推断的决定"（permanent=1
+		// 就是"不要给我留可还原副本"），默认必须是 0。
+		{"permanent 有默认值",
+			`INSERT INTO fs_jobs(op,src,entries_total,state,created_at,updated_at)
+			 VALUES('delete','["/a"]',1,'pending',1,1)`, true},
 	}
 	for _, c := range cases {
 		_, err := db.Exec(c.sql)
@@ -671,4 +676,62 @@ func openStoreForJobs(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db.SqlDB()
+}
+
+// permanent 列必须存在且默认 0（迁移 0007）。
+//
+// 单列出来而不是塞进上面那个约束测试：permanent 是 ALTER 加进来的，不是
+// 建表时就有的。"默认必须 0"这条尤其要紧——默认值一旦写成 1，每一条没显式
+// 说 permanent 的普通删除都会变成不可撤销的永久删除，而这只有在他想还原
+// 一个误删文件时才会被发现。
+func TestJobsPermanentColumnDefaultsZero(t *testing.T) {
+	db := openStoreForJobs(t)
+	if _, err := db.Exec(`INSERT INTO fs_jobs(op,src,entries_total,state,created_at,updated_at)
+		VALUES('delete','["/a"]',1,'pending',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	var perm int
+	if err := db.QueryRow(`SELECT permanent FROM fs_jobs LIMIT 1`).Scan(&perm); err != nil {
+		t.Fatalf("permanent 列不存在: %v", err)
+	}
+	if perm != 0 {
+		t.Errorf("permanent 默认该是 0（普通删除进回收站）, got %d", perm)
+	}
+}
+
+// Permanent 建时要写进去、读时要读得回来，并且非 delete 会被归零。
+//
+// copy 任务带 permanent=1 是调用方的 bug，但队列不该把这种垃圾组合原样
+// 存下来——它会让"这条永久删除为什么是 copy"变成一个没人能答的问题。
+func TestJobPermanentRoundTrip(t *testing.T) {
+	e := newJobEnv(t)
+	ctx := context.Background()
+	p, err := e.svc.CreateJob(ctx, JobInput{Op: OpDelete, Src: []string{e.mk(t, "a", "x")}, Permanent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Permanent {
+		t.Fatal("delete 的 permanent 该存下来")
+	}
+	c, err := e.svc.CreateJob(ctx, JobInput{Op: OpCopy, Src: []string{e.mk(t, "b", "x")}, Dst: "/d", Permanent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Permanent {
+		t.Error("非 delete 的 permanent 该被归零")
+	}
+	// 列举也要带回来（抽屉靠列举渲染，不走 GetJob）
+	list, err := e.svc.ListJobs(ctx, JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, j := range list {
+		if j.ID == p.ID && j.Permanent {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ListJobs 没带回 permanent（抽屉会丢这个信息）")
+	}
 }

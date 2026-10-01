@@ -297,12 +297,13 @@ func (s *Service) cancelRunning(id int64) {
 // 每写一块就 UPDATE 一次的话，一次大复制会打出几万次写 —— 而写提交在本机
 // 是 200µs 量级，数据库会变成整条复制路径的瓶颈，还会把 WAL 撑大。
 type throttler struct {
-	svc       *Service
-	jobCtx    context.Context
-	id        int64
-	clock     func() time.Time
-	lastWrite time.Time
-	lastBytes int64
+	svc         *Service
+	jobCtx      context.Context
+	id          int64
+	clock       func() time.Time
+	lastWrite   time.Time
+	lastBytes   int64
+	lastEntries int
 	// pending 是最新一次还没落库的进度。最后一次靠 flush 收尾。
 	pendBytes   int64
 	pendEntries int
@@ -334,11 +335,11 @@ func (t *throttler) report(doneBytes int64, entriesDone int) error {
 
 // flush 把最后一段进度写下去（正常收尾用）。
 func (t *throttler) flush() error {
-	if t.lastBytes == t.pendBytes && t.pendBytes == 0 {
-		return nil // 从头到尾没有进度可言（例如纯元数据操作）
-	}
-	if t.lastBytes == t.pendBytes {
-		return nil // 最后一段已经落过库
+	// 没越过任何阈值时也要看"自上次落库后有没有新进展"：字节或条目**任一**
+	// 动过就得补写最后一段。只看字节会让删除类任务（done_bytes 恒 0）的
+	// 最终 entries_done 永远停在第一次上报的值。
+	if t.lastBytes == t.pendBytes && t.lastEntries == t.pendEntries {
+		return nil // 最后一段已经落过库（或从头到尾没有任何进度）
 	}
 	// flush 不看取消：任务收尾时 jobCtx 往往已经因取消/关停被取消，而最终
 	// 进度恰恰在这时最需要写对。用独立的短上下文。
@@ -360,13 +361,11 @@ func (t *throttler) writeForce() error {
 	}
 	t.lastWrite = t.clock()
 	t.lastBytes = t.pendBytes
+	t.lastEntries = t.pendEntries
 	if t.svc.progressObserver != nil {
 		t.svc.progressObserver()
 	}
 	return nil
 }
 
-// runJob 是内置执行器：按 op 分派到 copy/move/delete（实现见 exec.go）。
-func (s *Service) runJob(ctx context.Context, j Job, report progressFunc) error {
-	return fmt.Errorf("未支持的任务类型 %q", j.Op)
-}
+// runJob 是内置执行器（按 op 分派到 copy/move/delete），定义在 exec_run.go。

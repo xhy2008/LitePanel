@@ -60,11 +60,11 @@ func (s *Service) movePath(ctx context.Context, src, dstDir string, report progr
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	srcReal, err := s.resolveMoveSrc(src)
+	srcReal, err := s.resolveSrcPath(src)
 	if err != nil {
 		return "", err
 	}
-	dstDirReal, err := s.resolveMoveDstDir(dstDir)
+	dstDirReal, err := s.resolveDstDir(dstDir)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +102,7 @@ func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, re
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	dstDirReal, err := s.resolveMoveDstDir(dstDir)
+	dstDirReal, err := s.resolveDstDir(dstDir)
 	if err != nil {
 		return 0, err
 	}
@@ -111,7 +111,7 @@ func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, re
 	plans := make([]plan, 0, len(srcs))
 	seen := make(map[string]bool, len(srcs)) // 目标侧重名（同一批里两个同名源）
 	for _, p := range srcs {
-		srcReal, err := s.resolveMoveSrc(p)
+		srcReal, err := s.resolveSrcPath(p)
 		if err != nil {
 			return 0, err
 		}
@@ -384,11 +384,11 @@ func (s *Service) verifyTree(ctx context.Context, srcRoot, dstRoot string) (bool
 
 // ---------- 路径解析 ----------
 
-// resolveMoveSrc 把移动源解析成确定路径并确认它存在。
+// resolveSrcPath 把移动源解析成确定路径并确认它存在。
 //
 // 末段不解析符号链接（SplitResolved）：移动一个链接要搬链接本身，而不是
 // 它指向的东西 —— 与 Stat/Rename/Delete 一致。
-func (s *Service) resolveMoveSrc(p string) (string, error) {
+func (s *Service) resolveSrcPath(p string) (string, error) {
 	dir, base, err := SplitResolved(p)
 	if err != nil {
 		return "", err
@@ -403,13 +403,13 @@ func (s *Service) resolveMoveSrc(p string) (string, error) {
 	return full, nil
 }
 
-// resolveMoveDstDir 解析目标目录并确认它是个目录。
+// resolveDstDir 解析目标目录并确认它是个目录。
 //
 // 不存在必须报 ErrNotDirectory 而**不是**顺手 mkdir：移动的目标是"目录"，
 // 它不存在说明路径写错了，悄悄建出来等于把东西丢进一个谁都没打算创建的
 // 目录，而界面上还显示"成功"。os.Stat 而不是 Lstat：末段是个指向目录的
 // 链接时，那个目录就是合法目标。
-func (s *Service) resolveMoveDstDir(p string) (string, error) {
+func (s *Service) resolveDstDir(p string) (string, error) {
 	full, err := AbsClean(p)
 	if err != nil {
 		return "", err
