@@ -218,3 +218,51 @@ trash_path = "/DISK/.trash"
 		t.Errorf("错误要告诉用户改成什么, got %q", err.Error())
 	}
 }
+
+// 后台拷贝/移动/删除的并发上限必须是可配的（设计 858：默认 2）。
+func TestJobConcurrencyDefaultAndLoad(t *testing.T) {
+	if Defaults().JobConcurrency != 2 {
+		t.Errorf("默认并发该是 2（设计 8.4），got %d", Defaults().JobConcurrency)
+	}
+	p := write(t, "job_concurrency = 5\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobConcurrency != 5 {
+		t.Errorf("没读进来, got %d", cfg.JobConcurrency)
+	}
+}
+
+// 越界的并发数必须报错而不是悄悄夹取。
+//
+// 尤其 0：**0 个 worker 的队列是一个完全无症状的瘫痪队列** —— 端点照常
+// 返回 job_id，界面照常显示"排队中"，而永远不会有东西开始跑。这跟漏接
+// 数据库是同一个失效形态，而配置文件是手写的，写的人需要被告知。
+// 上限 16：并发再高也只是让磁盘排队，而每个 worker 各占一个打开的文件
+// 与一块 1MB 缓冲，在 12GB 内存的机器上没有换来任何东西。
+func TestJobConcurrencyValidated(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  int
+		ok   bool
+	}{
+		{"下界 0 拒绝", 0, false},
+		{"负数拒绝", -1, false},
+		{"上界 16 可以", 16, true},
+		{"超上界拒绝", 17, false},
+		{"正常值可以", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			c.JobConcurrency = tc.val
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Errorf("JobConcurrency=%d 不该报错: %v", tc.val, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("JobConcurrency=%d 该报错却没有", tc.val)
+			}
+		})
+	}
+}

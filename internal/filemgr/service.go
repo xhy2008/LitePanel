@@ -256,3 +256,11 @@ func (s *Service) ProcDir() string { return s.procDir }
 func (s *Service) List(ctx context.Context, dir string, opts ListOptions) (ListPage, error) {
 	return List(ctx, dir, opts)
 }
+
+// JobConcurrency 回报实际生效的并发上限。
+//
+// 有 accessor 是因为"配置文件里写的数字有没有落到执行层"这件事，在没 accessor
+// 的情况下**没有任何外部可观察面**：漏传会被默认值悄悄夹住，不报错、不改行为,
+// 只让配置变成摆设。有了它，装配测试可以钉住传参本身，而不是靠"任务看起来
+// 有没有变快"（并发从 2 到 4 在机械盘上肉眼不可分辨）。
+func (s *Service) JobConcurrency() int { return s.jobConcurrency }

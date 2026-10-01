@@ -33,7 +33,19 @@ type Config struct {
 	TrashDirName string `toml:"trash_dir_name"`
 	// TrashRetainDays 是回收站条目保留天数（设计 D12：默认 3，可设 1–90）。
 	TrashRetainDays int `toml:"trash_retain_days"`
-	TLS             TLSConfig
+	// JobConcurrency 是后台复制/移动/删除的并发上限（设计 858：默认 2）。
+	//
+	// 它必须是可配的，而且 0 必须被拒：**0 个 worker 的队列是一个完全无
+	// 症状的瘫痪队列** —— 提交照常返回 job_id、界面照常转"排队中"，而
+	// 永远不会有任务开始跑。.1 项那样漏接数据库也是同一形态，但那是装配
+	// bug（会被装配测试逮住），这个是用户手写出来的、没人会去怀疑一个
+	// 数字没被用上。
+	//
+	// 为什么不是越大越好：这台机器上是 HDD + 12GB 内存，并发复制的收益在
+	// 2–4 之后就是磁头互相打断；而每个 worker 各握着一块 1MB 缓冲和若干
+	// 打开的文件描述符。上限 16 是"再高也不会更快，只会更挤"的分界。
+	JobConcurrency int `toml:"job_concurrency"`
+	TLS            TLSConfig
 
 	// PasswordSet 由主程序在打开 DB 后回填：DB 中是否已存在密码。
 	PasswordSet bool `toml:"-"`
@@ -47,6 +59,7 @@ func Defaults() Config {
 		DBPath:          "/var/lib/litepanel/litepanel.db",
 		TrashDirName:    ".trash",
 		TrashRetainDays: 3,
+		JobConcurrency:  2,
 	}
 }
 
@@ -104,6 +117,11 @@ func (c Config) Validate() error {
 	}
 	if err := c.validateTrash(); err != nil {
 		return err
+	}
+	// 与回收站天数的处理一致：配置文件是手写的，越界要**告知**而不是夹取。
+	// （运行期从设置页写入的值另有装配层兜底，两处职责不同。）
+	if c.JobConcurrency < 1 || c.JobConcurrency > 16 {
+		return fmt.Errorf("job_concurrency（后台任务并发数）应在 1–16 之间，当前 %d；设为 0 会让所有复制/移动/删除永远停在排队中", c.JobConcurrency)
 	}
 	return nil
 }

@@ -126,6 +126,12 @@ func main() {
 	// 干活"这件事多出第二个没人说得出理由的时间点。
 	startTrashJanitor(janitorCtx, deps, trashJanitorInterval)
 
+	// 后台文件任务池。与两个 janitor 不同：那两个用 janitorCtx（随信号退）,
+	// 这里不能用 —— 它的立论就是"提交任务的那个请求会先死"，而任务要活到
+	// 跑完。因此池拿自己的上下文，关停时由 fileJobs.Stop 显式收。
+	// 具体理由见 jobs_wiring.go 头注。
+	fileJobs := startFileJobs(deps.Files)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -135,6 +141,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(context.Background())
+	// 任务池在服务之前收：池里可能正在把一个目录从 A 盘扫到 B 盘，而托管
+	// 服务重启不干扰它，反过来（先关服务再等池）只会把整段关停拖长。
+	// 真正的强约束是它必须在 srv.Shutdown 之后：否则"新提交一个 /fs/move"
+	// 与"池已停"能并发，用户拿到一个永远跑不了的 job_id。
+	fileJobs.Stop(ctx)
 	if err := sup.Shutdown(ctx); err != nil {
 		logx.Info("关停托管服务: %v", err)
 	}
@@ -292,7 +303,15 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 选 db 同级：那里必然可写（面板正在往那里写 SQLite），且必然
 		// 属于面板自己，不会出现在用户的数据目录里。
 		Files: filemgr.NewService(filemgr.Options{
-			UploadRoot: uploadRootFor(cfg.DBPath),
+			// 没接这个的后果不是报错而是静默降级：fs 任务端点仍在、job_id
+			// 照发、界面转"排队中"，而永远不会有文件被动过。它跟 DB 传否
+			// 直接挂钩，所以归 buildDeps 自己负责（与 Files/UploadRoot 同一
+			// 条理由：不让"接没接"取决于 main 有没有被跑到）。
+			DB: db,
+			// 并发上限来自配置（设计 858：默认 2）。能走到这里的零值只会是
+			// "没写这一项"（配置层已经拒掉了显式的 0）。
+			JobConcurrency: cfg.JobConcurrency,
+			UploadRoot:     uploadRootFor(cfg.DBPath),
 			// 回收站按盘分置：这里给的是**目录名**（每个盘根下各建
 			// 一个），不是某个绝对路径 —— cfg 里那个键以前叫
 			// trash_path，绝对路径的语义已经没了（config 会拒绝旧键）。
