@@ -88,6 +88,18 @@ export function createApi(deps: HttpDeps) {
 
 export type Api = ReturnType<typeof createApi>;
 
+/**
+ * 给"不走 api 封装"的请求用同一个 fetch 出口。
+ *
+ * 分块上传必须自己发请求：api.post 固定把 body JSON 编码，而上传的 body
+ * 是原始字节 + 元信息在头里（设计 17 节）。但它仍然要共用同一个 fetch,
+ * 这样测试只要换一处注入就能同时接管两条路径；各用各的 fetch 会让
+ * "注入替身"这件事出现第二个入口，而第二个入口通常是忘注入的那个。
+ */
+export function fetcher(): typeof globalThis.fetch {
+  return globalThis.fetch.bind(globalThis);
+}
+
 let singleton: Api | null = null;
 
 /** 浏览器环境下的默认实例。 */
