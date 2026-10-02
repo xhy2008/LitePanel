@@ -41,6 +41,10 @@ export const PATHS: Record<string, string[]> = {
   trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 14h10l1-14', 'M10 11v6', 'M14 11v6'],
   close: ['M6 6l12 12', 'M18 6 6 18'],
 
+  // ---- 后台任务 ----
+  move: ['M4 7h9a4 4 0 0 1 4 4v3', 'M14 11l3 3 3-3', 'M4 4l-3 3 3 3', 'M4 7v10'],
+  retry: ['M20 12a8 8 0 1 1-2.3-5.7', 'M20 4v4h-4'],
+
   // ---- 快捷命令 ----
   arrow_upward: ['M12 19V5', 'M5 12l7-7 7 7'],
   arrow_downward: ['M12 5v14', 'M19 12l-7 7-7-7'],

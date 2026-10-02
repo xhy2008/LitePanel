@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import { useBreakpoint } from './composables/useBreakpoint';
 import SideNav from './layout/SideNav.vue';
 import MobileTabMenu from './layout/MobileTabMenu.vue';
+import JobDrawer from './components/jobs/JobDrawer.vue';
 import RightRail from './layout/RightRail.vue';
 import MetricTicks from './components/metrics/MetricTicks.vue';
 import MetricsPanel from './components/metrics/MetricsPanel.vue';
@@ -156,6 +157,12 @@ watch(bp, () => (railOpen.value = false));
     </main>
 
     <div v-if="toastMsg" class="toast" role="status">{{ toastMsg }}</div>
+
+    <!-- 全局任务抽屉。放在壳层而不是文件页里是刻意的：任务的生命周期与
+         "用户当前看哪个页"无关，抽屉跟着文件页卸载就等于把后端"关浏览器
+         也不中断"的能力在界面上抹掉 —— 看不见就会被当成没生效，用户会
+         去重做一遍，而那正是任务队列要防的重复劳动。 -->
+    <JobDrawer />
 
     <RightRail
       v-if="bp !== 'phone'"
