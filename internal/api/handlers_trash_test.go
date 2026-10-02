@@ -26,6 +26,7 @@ import (
 type trashHarness struct {
 	*harness
 	disk string // 虚构的那个"盘"的根
+	svc  *filemgr.Service
 }
 
 func setUpTrash(t *testing.T) *trashHarness {
@@ -40,14 +41,27 @@ func setUpTrash(t *testing.T) *trashHarness {
 	}
 	h := &trashHarness{disk: disk}
 	h.harness = newHarnessWith(t, func(d *api.AuthDeps) {
-		d.Files = filemgr.NewService(filemgr.Options{
+		// 删除从同步改走队列之后，这个夹具也要带上库与 worker 池：
+		// 回收站的行为（进栈/还原/整批拒绝）现在发生在任务执行里，
+		// 没有池就没人执行，测试只能验到"受理"。
+		svc := filemgr.NewService(filemgr.Options{
+			DB:             d.DB,
 			ProcDir:        "/proc",
+			JobConcurrency: 1,
 			FilesystemRoot: func(string) (string, error) { return disk, nil },
 			TrashRoots: func(context.Context) ([]string, error) {
 				return []string{disk}, nil
 			},
 		})
+		d.Files = svc
+		d.Jobs = svc
+		h.svc = svc
 	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if !h.svc.StartJobs(ctx) {
+		t.Fatal("任务池没起来：删除任务的测试全都会挂起")
+	}
 	return h
 }
 
@@ -81,8 +95,12 @@ func (h *trashHarness) httpDel(path string) *http.Response {
 	return h.do("DELETE", path, true, csrf, "", "")
 }
 
-// trash 调 POST /api/fs/delete 把一个路径移进回收站（界面上的"删除"）。
-func (h *trashHarness) trash(paths ...string) *http.Response {
+// trash 把一个路径删进回收站并**等任务落地**。
+//
+// 等是必须的：删除改成队列任务之后，POST 回来时什么都还没发生，而这里的
+// 每一个调用方都是"先造一个已在回收站里的条目"这个前置条件 —— 不等就是
+// 拿一个还没开始的前置去断言后面的结果，在 CI 上会随机红。
+func (h *trashHarness) trash(paths ...string) {
 	h.t.Helper()
 	var sb strings.Builder
 	for i, p := range paths {
@@ -91,7 +109,10 @@ func (h *trashHarness) trash(paths ...string) *http.Response {
 		}
 		sb.WriteString(jq(p))
 	}
-	return h.postJSON("/api/fs/delete", `{"paths":[`+sb.String()+`]}`)
+	j := h.deleteJob(h.t, `{"paths":[`+sb.String()+`]}`)
+	if j.State != filemgr.JobDone {
+		h.t.Fatalf("前置删除该成功, got %s (%s)", j.State, j.Error)
+	}
 }
 
 func trashNames(t *testing.T, res *http.Response) []string {
@@ -113,14 +134,17 @@ func trashNames(t *testing.T, res *http.Response) []string {
 
 // ---------- POST /api/fs/delete ----------
 
-// 删除一个文件要 200 并把它移进回收站（不是永久删除）。
+// 删除一个文件：受理 202，任务跑完后它进回收站（不是永久删除）。
+//
+// 200 改 202 是有意的语义变化：受理时**一个文件都还没动**，回 200 +
+// "deleted: 1" 会谎称工作已经完成。判据仍然是盘上真相（源消失 + 回收站
+// 里有它且能还原），只是要等任务落地之后再验。
 func TestDeleteEndpointTrashes(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "报告.txt", "内容")
-	res := h.postJSON("/api/fs/delete", `{"paths":[`+jq(p)+`]}`)
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("删除应 200, got %d", res.StatusCode)
+	j := h.deleteJob(t, `{"paths":[`+jq(p)+`]}`)
+	if j.State != filemgr.JobDone {
+		t.Fatalf("任务该成功, got %s (%s)", j.State, j.Error)
 	}
 	if _, err := os.Lstat(p); !os.IsNotExist(err) {
 		t.Errorf("源文件还在: %v", err)
@@ -133,15 +157,20 @@ func TestDeleteEndpointTrashes(t *testing.T) {
 	}
 }
 
-// 删除一批：每个都进回收站，返回条数。
+// 删除一批：一个任务、两条都进回收站，entries_total 记下这批有几条。
+//
+// "一次框选 500 个文件"必须是**一条**任务而不是 500 条：用户点了一次删除,
+// 抽屉里就该只有一条可以取消/重试的记录。
 func TestDeleteEndpointBatch(t *testing.T) {
 	h := setUpTrash(t)
 	a := h.mk(t, "a.txt", "1")
 	b := h.mk(t, "b.txt", "2")
-	res := h.postJSON("/api/fs/delete", `{"paths":[`+jq(a)+`,`+jq(b)+`]}`)
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("应 200, got %d", res.StatusCode)
+	j := h.deleteJob(t, `{"paths":[`+jq(a)+`,`+jq(b)+`]}`)
+	if j.State != filemgr.JobDone {
+		t.Fatalf("任务该成功, got %s (%s)", j.State, j.Error)
+	}
+	if j.EntriesTotal != 2 {
+		t.Errorf("一批该是一条任务、两条进度, got entries_total=%d", j.EntriesTotal)
 	}
 	if names := trashNames(t, h.get("/api/fs/trash")); len(names) != 2 {
 		t.Errorf("两条都该进回收站: %v", names)
@@ -158,10 +187,15 @@ func TestDeleteEndpointEmptyPaths(t *testing.T) {
 	}
 }
 
-// paths 里有一个不存在：整批不处理，回 404，而不是"删了一半"。
+// paths 里有一个不存在：整批不处理，任务失败，而不是"删了一半"。
 //
 // 部分成功是最坏的结果：界面上报错，而实际有些文件已经进回收站，用户
 // 无法知道到底是哪几个动了。所以实现是"先把整批校验完，再开始动手"。
+//
+// 同步改异步之后报错时机从 404 变成"一条失败的任务"，但**这条陈诺一字
+// 不改**，而且它的价值反而更高了：走队列时提交与执行之间隔得更久，"到
+// 底动没动"更需要一个明确答案。判据也从状态码挪到了盘上（回收站里 0 条
+// + 那个好文件还在原地），这才是陈诺的本体。
 //
 // 两种顺序都要测，而且**好路径在前**那条才是关键：坏路径排第一时，
 // 哪怕实现是"边遍历边删"也会在第一步就失败、看起来行为正确；只有坏
@@ -184,10 +218,9 @@ func TestDeleteEndpointOneMissingRejectsAll(t *testing.T) {
 			h := setUpTrash(t)
 			good := h.mk(t, "good.txt", "x")
 			paths := order.build(h.disk)
-			res := h.postJSON("/api/fs/delete", `{"paths":[`+jq(paths[0])+`,`+jq(paths[1])+`]}`)
-			defer res.Body.Close()
-			if res.StatusCode != http.StatusNotFound {
-				t.Fatalf("有一个不存在应 404, got %d", res.StatusCode)
+			j := h.deleteJob(t, `{"paths":[`+jq(paths[0])+`,`+jq(paths[1])+`]}`)
+			if j.State != filemgr.JobFailed {
+				t.Fatalf("有一个不存在该让任务失败, got %s", j.State)
 			}
 			if _, err := os.Lstat(good); err != nil {
 				t.Errorf("同批里存在的那个被误删了: %v", err)
@@ -195,19 +228,37 @@ func TestDeleteEndpointOneMissingRejectsAll(t *testing.T) {
 			if names := trashNames(t, h.get("/api/fs/trash")); len(names) != 0 {
 				t.Errorf("失败的删除批不该留下条目: %v", names)
 			}
+			// 失败原因要说得出是什么没了：抽屉里一条"失败"而没有对象，
+			// 用户只能挨个目录去翻。
+			if !strings.Contains(j.Error, "没有.txt") {
+				t.Errorf("失败原因该带上那个不存在的路径, got %q", j.Error)
+			}
 		})
 	}
 }
 
 // 删除要 CSRF 头（与其它写操作一致）。
+//
+// 走队列之后这条更该测：缺头时**连任务都不该建出来**。只看"文件还在原地"
+// 已经不够了 —— 受理阶段本来就不动文件，任何实现都能过。所以要同时验
+// 队列是空的：跨站请求连"排一个删除"都做不到。
 func TestDeleteEndpointNeedsCSRF(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "a.txt", "x")
 	res := h.do("POST", "/api/fs/delete", true, "", `{"paths":[`+jq(p)+`]}`, "")
 	defer res.Body.Close()
-	// CSRF 缺头的具体码由中间件定（403），这里只确认没被当成合法删除。
+	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("缺 CSRF 头该 403, got %d", res.StatusCode)
+	}
 	if _, err := os.Lstat(p); err != nil {
 		t.Error("缺 CSRF 头不该真的删除")
+	}
+	jobs, err := h.svc.ListJobs(context.Background(), filemgr.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("缺 CSRF 头连任务都不该建出来, got %d 条", len(jobs))
 	}
 }
 
@@ -215,10 +266,12 @@ func TestDeleteEndpointNeedsCSRF(t *testing.T) {
 func TestDeleteEndpointPermanent(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "临时.bin", "x")
-	res := h.postJSON("/api/fs/delete", `{"paths":[`+jq(p)+`],"permanent":true}`)
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("永久删除应 200, got %d", res.StatusCode)
+	j := h.deleteJob(t, `{"paths":[`+jq(p)+`],"permanent":true}`)
+	if j.State != filemgr.JobDone {
+		t.Fatalf("永久删除该成功, got %s (%s)", j.State, j.Error)
+	}
+	if !j.Permanent {
+		t.Error("permanent 没传到任务上")
 	}
 	if _, err := os.Lstat(p); !os.IsNotExist(err) {
 		t.Error("没删掉")
@@ -248,7 +301,7 @@ func TestTrashListEmptyIsArray(t *testing.T) {
 func TestTrashListFields(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "docs/重要.txt", "内容")
-	h.trash(p).Body.Close()
+	h.trash(p)
 	res := h.get("/api/fs/trash")
 	body := readBody(t, res)
 	for _, want := range []string{`"name":"重要.txt"`, `"origin":`, `"mount":`, `"is_dir":false`, `"size":`, `"deleted_at":`} {
@@ -263,7 +316,7 @@ func TestTrashListFields(t *testing.T) {
 func TestTrashRestoreRoundTrip(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "报告.txt", "原始内容")
-	h.trash(p).Body.Close()
+	h.trash(p)
 	id := onlyTrashID(t, h.get("/api/fs/trash"))
 	res := h.postJSON("/api/fs/trash/"+id+"/restore", `{}`)
 	defer res.Body.Close()
@@ -286,7 +339,7 @@ func TestTrashRestoreRoundTrip(t *testing.T) {
 func TestTrashRestoreConflict(t *testing.T) {
 	h := setUpTrash(t)
 	p := h.mk(t, "a.txt", "旧")
-	h.trash(p).Body.Close()
+	h.trash(p)
 	id := onlyTrashID(t, h.get("/api/fs/trash"))
 	// 原位置占上别的文件
 	h.mk(t, "a.txt", "新占位")
@@ -334,7 +387,7 @@ func TestTrashRestoreTraversalID(t *testing.T) {
 // 永久删除单个条目要带 confirm=1（危险操作，设计 486 行）。
 func TestTrashPurgeNeedsConfirm(t *testing.T) {
 	h := setUpTrash(t)
-	h.trash(h.mk(t, "a.txt", "x")).Body.Close()
+	h.trash(h.mk(t, "a.txt", "x"))
 	id := onlyTrashID(t, h.get("/api/fs/trash"))
 	// 没带 confirm：拒绝，条目还在
 	res := h.httpDel("/api/fs/trash/" + id)
@@ -369,7 +422,7 @@ func TestTrashPurgeUnknownID(t *testing.T) {
 
 func TestTrashEmptyNeedsConfirm(t *testing.T) {
 	h := setUpTrash(t)
-	h.trash(h.mk(t, "a.txt", "x"), h.mk(t, "b.txt", "y")).Body.Close()
+	h.trash(h.mk(t, "a.txt", "x"), h.mk(t, "b.txt", "y"))
 	res := h.postJSON("/api/fs/trash/empty", `{}`)
 	res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {
@@ -461,11 +514,14 @@ func TestDeleteTrashUnwritableMapsToCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newHarnessWith(t, func(d *api.AuthDeps) {
-		d.Files = filemgr.NewService(filemgr.Options{
+		svc := filemgr.NewService(filemgr.Options{
 			ProcDir:        "/proc",
+			DB:             d.DB, // 受理要落库
 			FilesystemRoot: func(string) (string, error) { return disk, nil },
 			TrashRoots:     func(context.Context) ([]string, error) { return []string{disk}, nil },
 		})
+		d.Files = svc
+		d.Jobs = svc
 	})
 	// 盘根只读：建 .trash 必然失败
 	if err := os.Chmod(disk, 0o500); err != nil {
@@ -492,7 +548,10 @@ func TestDeleteTrashUnwritableMapsToCode(t *testing.T) {
 // 是客户端自己走的，这个区分是反代日志与告警唯一能看出真相的地方。
 func TestDeleteCanceledMapsToClientGone(t *testing.T) {
 	h := newHarnessWith(t, func(d *api.AuthDeps) {
-		d.Files = stubFiles{fmt.Errorf("移入回收站: %w", context.Canceled)}
+		// 走队列之后，受理阶段唯一会拿到 context.Canceled 的地方是落库
+		// 那一步（CreateJob 用的是 r.Context()），所以替身换成分支上真正
+		// 被调用的 Jobs。
+		d.Jobs = stubJobs{fmt.Errorf("写入任务: %w", context.Canceled)}
 	})
 	res := h.do("POST", "/api/fs/delete", true, csrf, `{"paths":["/data/a"]}`, "")
 	defer res.Body.Close()
@@ -501,3 +560,80 @@ func TestDeleteCanceledMapsToClientGone(t *testing.T) {
 	}
 	assertErrorCode(t, res, "canceled")
 }
+
+// ---------- 任务化的删除：等待与断言 ----------
+
+// waitJobDone 等一条任务离开活动态，返回它最终的状态。
+//
+// 删除改成队列任务之后，HTTP 回 202 时**什么还没发生**，所有"文件是不是
+// 进了回收站"的断言都必须先等到任务落地。等待而不是 sleep：sleep 要么太短
+// （CI 上随机红）要么太长（整套测试慢成几分钟），而"等一个可观察的终态"
+// 两头都对。
+//
+// failed 也算"离开活动态"并原样返回：有一半的用例**要的**就是失败（整批
+// 拒绝那条），在助手里 panic 会让那些用例没法写。
+func (h *trashHarness) waitJobSettled(t *testing.T, id int64) filemgr.Job {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		j, err := h.svc.GetJob(context.Background(), id)
+		if err != nil {
+			t.Fatalf("读任务 %d: %v", id, err)
+		}
+		switch j.State {
+		case filemgr.JobDone, filemgr.JobFailed, filemgr.JobCanceled, filemgr.JobInterrupted:
+			return j
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	t.Fatalf("任务 %d 没在 10s 内结束", id)
+	return filemgr.Job{}
+}
+
+// deleteAndWait 提交删除并等任务落地，回 (响应码, 终态任务)。
+//
+// 绝大多数删除用例关心的是**结果**，这个助手把"取 job_id + 等收尾"折成一步，
+// 免得每个用例都抄两遍而总有一遍抄漏（漏掉等待的用例会在 CI 上随机红，
+// 而本地跑得飞快 —— 那是最难查的一类偶发失败）。
+func (h *trashHarness) deleteAndWait(t *testing.T, body string) (int, filemgr.Job) {
+	t.Helper()
+	res := h.postJSON("/api/fs/delete", body)
+	if res.StatusCode != http.StatusAccepted {
+		defer res.Body.Close()
+		return res.StatusCode, filemgr.Job{}
+	}
+	var b struct {
+		JobID int64 `json:"job_id"`
+	}
+	// decodeBody 会 Close，所以不再另加 defer：同一个 body 关两次不致命，
+	// 但会让人以为这里有意为之。
+	decodeBody(t, res, &b)
+	return http.StatusAccepted, h.waitJobSettled(t, b.JobID)
+}
+
+// deleteJob 是"提交删除 + 等落地"的简写，回终态任务。
+//
+// 名字不说"OK"：它不检查成败，因为有一半用例要的就是一条失败的任务。
+func (h *trashHarness) deleteJob(t *testing.T, body string) filemgr.Job {
+	t.Helper()
+	code, j := h.deleteAndWait(t, body)
+	if code != http.StatusAccepted {
+		t.Fatalf("受理该 202, got %d", code)
+	}
+	return j
+}
+
+// stubJobs 是只回一个固定错误的 Jobs 替身。
+//
+// 与 stubFiles 同样的存在理由：只为了验"某个错误映射成哪个状态码"而拉起
+// 真库真盘不划算，而这些映射（499/409/503…）是有意写进实现的策略。
+type stubJobs struct{ err error }
+
+func (s stubJobs) CreateJob(context.Context, filemgr.JobInput) (filemgr.Job, error) {
+	return filemgr.Job{}, s.err
+}
+func (s stubJobs) ListJobs(context.Context, filemgr.JobFilter) ([]filemgr.Job, error) {
+	return nil, s.err
+}
+func (s stubJobs) RequestCancelJob(context.Context, int64) error        { return s.err }
+func (s stubJobs) PreflightTrash(context.Context, []string, bool) error { return s.err }

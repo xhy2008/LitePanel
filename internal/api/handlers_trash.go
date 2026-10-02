@@ -4,23 +4,41 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"litepanel/internal/filemgr"
 )
 
-// 回收站的 HTTP 层（设计 702-705 行）+ 删除入口。
+// 回收站的 HTTP 层（设计 702–705 行）+ 删除入口。
 //
-// 设计 17 节的端点表里**没有删除**：原本打算让删除走 M6-T4 的 jobs 异步
-// 队列（复制/移动那种耗时操作才需要）。回收站改成按盘分置之后，删除是
-// 一次同盘 rename(2)：瞬时、不占额外空间。把它塞进任务队列只会让用户
-// 按下删除后先看到"任务已提交"再等一次轮询 —— 一个纯负的收益。所以
-// 这里直接给 POST /api/fs/delete，jobs 里仍然保留复制/移动这类真需要
-// 后台化的操作。
+// 删除走的是队列，不是同步执行。这件事在两处设计文本里看起来矛盾，值得
+// 写清楚：设计 705 行把 POST /api/fs/delete 单列成一个端点，而第 115 行
+// 说"前端提交 copy/move/delete → 后端立即落库 job 并返回 job_id"，且没有
+// 给小批量留同步分支。这里的取舍是：**路径保留**（M6-T5 的前端删除按钮
+// 已经在调它，改路径只会白折腾一次前后端），**实现改成建任务**。于是
+// /fs/delete 是 /fs/jobs 的一个特化：op 固定 delete、不带 dst。
+//
+// 为什么必须走队列而不是"删除很快，同步就行"：回收站按盘分置之后，单条
+// 删除确实是一次同盘 rename(2)；但界面上一次框选可以是几万个路径（实测
+// 约 220µs/条，5000 条约 1.1s，10 万条按目录树深度还要更久）。同步端点
+// 里 r.Context() 会随关标签页、锁屏、代理超时取消，删除**就地停在一半**,
+// 用户只看到一个网络错误，既不知道实际删了哪几个、也不知道剩下的仍在原地
+// （实测中断时原地剩 2999/3000）。这恰恰是验收项"删除不因浏览器关闭
+// 而中断"要防的事。
 //
 // 危险操作的二次确认一律服务端强制（设计 486 行；同 /term/sessions 的
 // ?confirm=1）：只在前端弹确认框的话，一个脚本或一个被改过的前端就能
 // 绕过，而"清空回收站"和"永久删除"都是不可逆的。
 
 // handleFSDelete 处理 POST /api/fs/delete {paths:[...], permanent:bool}。
-func handleFSDelete(svc Files) http.HandlerFunc {
+//
+// 回 202 + job_id（与 /fs/jobs 同一形状），**不回**"已删除 N 条"。
+//
+// 受理阶段一个文件都不动，所以这里没有"存在性"可报：paths 里有一条不存在
+// 时不再回 404，而是任务在执行时失败（整批不动，见 filemgr.deleteMany 的
+// 先校验后执行）。这是同步改异步真实的、有意的体验变化 —— 报错从"立刻"
+// 变成"任务列表里一条红色"。换来的那个保证更值钱：浏览器关掉，删除要么
+// 整批做完要么整批不做。
+func handleFSDelete(svc Jobs) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Paths     []string `json:"paths"`
@@ -30,12 +48,22 @@ func handleFSDelete(svc Files) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
-		n, err := svc.DeleteMany(r.Context(), in.Paths, in.Permanent)
-		if err != nil {
-			writeFSError(w, err)
+		// 回收站建不起来的盘要在这里就说出口：前端靠这个哨兵码（422）
+		// 把唯一可行的出路（永久删除，二次确认）摆给用户。
+		if err := svc.PreflightTrash(r.Context(), in.Paths, in.Permanent); err != nil {
+			writeJobError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": n, "permanent": in.Permanent})
+		j, err := svc.CreateJob(r.Context(), filemgr.JobInput{
+			Op:        filemgr.OpDelete,
+			Src:       in.Paths,
+			Permanent: in.Permanent,
+		})
+		if err != nil {
+			writeJobError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, jobResponse{Job: j, JobID: j.ID})
 	}
 }
 
@@ -70,7 +98,7 @@ func handleFSTrashRestore(svc Files) http.HandlerFunc {
 	}
 }
 
-// handleFSTrashPurge 处理 DELETE /api/fs/trash/{id}?confirm=1。
+// handleFSTrashPurge 处理 DELETE /api/fs/trash/{id}?confirm=1（永久删一条）。
 func handleFSTrashPurge(svc Files) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireConfirm(w, r, "永久删除回收站条目") {

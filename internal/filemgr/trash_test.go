@@ -1220,3 +1220,167 @@ func TestRealFilesystemRootAnchorsAtRoot(t *testing.T) {
 		t.Errorf("/ 的锚点必须是 /，got %q", got)
 	}
 }
+
+// ---------- PreflightTrash（受理时的回收站可写性检查）----------
+
+// addDisk 往假挂载表里再加一块盘。
+//
+// 不用重建 Service：夹具里的 FilesystemRoot/TrashRoots 是两个每次调用都
+// 现读 e.roots 的闭包，所以 append 立刻对已存在的 svc 生效。
+func (e *trashEnv) addDisk(dir string) {
+	e.roots = append(e.roots, dir)
+}
+
+// 盘根写不进回收站时，**受理时**就要报 ErrTrashUnwritable。
+//
+// 删除改走队列之后，这个错误本来只会出现在任务执行时（抽屉里一条红色）。
+// 那丢掉了一条有意的产品保证：界面上"这个盘只能永久删除"那个按钮，靠的是
+// HTTP 拿到 ErrTrashUnwritable 这个**哨兵**（errors.Is）才能亮起来；错误
+// 只能在任务里看到的话，前端就只剩"对中文错误文本做子串匹配"这一条路，
+// 而这条路在本项目里被明令禁止（改一句文案就会把 422 变成没有）。
+//
+// 所以这里把它提前到受理时。这不是"顺手 stat 一下源"那种提前校验 ——
+// 源存在性会过期（检查完到执行之间文件可能被人删了），而"这块盘的回收站
+// 建得起来"是**盘的性质**，稳定得多；且执行时的检查照样会跑，提前检查只是
+// 多加一次提前的坏消息，不会让任何判定失效。
+func TestPreflightTrashRejectsUnwritableRoot(t *testing.T) {
+	e := newTrashEnv(t)
+	p := e.mk(t, "disk", "a.txt", "x")
+	// 先造好文件**再**锁盘：反过来会在 mk 这一步就 permission denied，
+	// 测到的是夹具而不是预检。
+	if err := os.Chmod(e.disk, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.disk, 0o755) })
+	err := e.svc.PreflightTrash(context.Background(), []string{p}, false)
+	if !errors.Is(err, ErrTrashUnwritable) {
+		t.Fatalf("盘根只读该报 ErrTrashUnwritable, got %v", err)
+	}
+	// 提示里要说得出下一步：只能永久删除，或改用 SFTP
+	if !strings.Contains(err.Error(), "永久删除") {
+		t.Errorf("错误该指出唯一出路, got %q", err)
+	}
+}
+
+// permanent=true 不需要回收站，因此不该拦。
+//
+// 这条方向反过来就是死锁：盘根写不进去 + 唯一可行的删除方式被自己的前置
+// 检查拒掉 = 用户在这个盘上一个文件都删不了。
+func TestPreflightTrashSkippedForPermanent(t *testing.T) {
+	e := newTrashEnv(t)
+	p := e.mk(t, "disk", "a.txt", "x")
+	if err := os.Chmod(e.disk, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.disk, 0o755) })
+	if err := e.svc.PreflightTrash(context.Background(), []string{p}, true); err != nil {
+		t.Errorf("永久删除不该要求回收站可写: %v", err)
+	}
+}
+
+// 多个盘里只有一个写不进去：要报出来，且说的是**那块盘**。
+//
+// 只报"回收站不可写"而不说是哪块盘的话，用户会在能写的那块盘上反复重试。
+func TestPreflightTrashNamesTheOffendingDisk(t *testing.T) {
+	e := newTrashEnv(t)
+	good := e.mk(t, "disk", "b.txt", "x")
+	bad := e.mk(t, "home", "a.txt", "x")
+	// home 盘只读，disk 盘保持正常（在文件造好之后才锁）
+	if err := os.Chmod(e.home, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.home, 0o755) })
+	err := e.svc.PreflightTrash(context.Background(), []string{good, bad}, false)
+	if !errors.Is(err, ErrTrashUnwritable) {
+		t.Fatalf("该报 ErrTrashUnwritable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), e.home) {
+		t.Errorf("错误该指出是哪块盘, got %q", err)
+	}
+	// 不能把可写的那块盘也一起拒了：否则一个只读盘会让所有删除都做不了
+	if strings.Contains(err.Error(), e.disk) {
+		t.Errorf("不该把可写的盘也说成有问题: %q", err)
+	}
+}
+
+// 路径不存在时**不在这里**报错：那是执行时的事。
+//
+// 受理阶段的职责只有"这个请求能不能做"，而"做的时候东西还在不在"归执行
+// （那里还得再判一次，因为中间可能已经变了）。把两种错混在一处，界面就
+// 分不清"你选的东西没了"与"这块盘不行"，而两者给用户的下一步完全不同。
+func TestPreflightTrashIgnoresMissingPaths(t *testing.T) {
+	e := newTrashEnv(t)
+	if err := e.svc.PreflightTrash(context.Background(),
+		[]string{filepath.Join(e.disk, "不存在.txt")}, false); err != nil {
+		t.Errorf("源不存在不该由预检报错: %v", err)
+	}
+}
+
+// 回收站已经建好时，预检必须**不动盘**（不 chmod、不改时间）。
+//
+// 预检是每次删除都要跑的热路径。已存在的 .trash 每次都重刷权限的话，
+// 一次框选删除会顺带改动回收站目录的 ctime —— 用户会因为"只是想删个文件"
+// 看到回收站目录的元信息在变。更要紧的是：ensureTrashDir 本身就有收紧
+// 权限的副作用，预检复制它等于把副作用做两遍。
+func TestPreflightTrashDoesNotTouchExistingTrash(t *testing.T) {
+	e := newTrashEnv(t)
+	p := e.mk(t, "disk", "a.txt", "x")
+	// 先做一次真删除，把 .trash 建起来
+	if _, err := e.svc.Delete(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	trash := filepath.Join(e.disk, e.svc.TrashDirName())
+	st1, err := os.Stat(trash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 换个时间戳，若预检碰了这个目录就会被看到
+	soon := time.Unix(1600000000, 0)
+	if err := os.Chtimes(trash, soon, soon); err != nil {
+		t.Fatal(err)
+	}
+	q := e.mk(t, "disk", "b.txt", "y")
+	if err := e.svc.PreflightTrash(context.Background(), []string{q}, false); err != nil {
+		t.Fatalf("回收站可用时预检不该报错: %v", err)
+	}
+	st2, err := os.Stat(trash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st2.ModTime().Equal(soon) {
+		t.Errorf("预检动了回收站目录: mtime %v -> %v", soon, st2.ModTime())
+	}
+	if st1.Mode() != st2.Mode() {
+		t.Errorf("预检改了回收站权限: %v -> %v", st1.Mode(), st2.Mode())
+	}
+}
+
+// 一批同盘路径只回一个盘的错。
+//
+// 这条**不**声称在验证"按盘去重"。去重只改变系统调用次数，而预检一发现
+// 不可写就立刻返回 —— 观测面上两种实现一字不差（实测把 `seen[mount]`
+// 整个关掉，全仓测试仍然全绿）。要真钉住"查几次"就得给 trashWritable 开
+// 一个计数注入口，为一个纯成本护栏往生产代码里加接缝不值。
+//
+// 所以这条钉的是能观测的那一半：50 个路径配一块坏盘，错误里只出现那块盘
+// 一次。少了它会退化成"同一个盘的同一个问题被写进错误五十遍"，那才是
+// 用户在抽屉里真正看到的东西。
+func TestPreflightTrashReportsOneDiskOnce(t *testing.T) {
+	e := newTrashEnv(t)
+	var paths []string
+	for i := 0; i < 50; i++ {
+		paths = append(paths, e.mk(t, "disk", "f"+itoa(i), "x"))
+	}
+	// 文件都造好之后再锁盘
+	if err := os.Chmod(e.disk, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.disk, 0o755) })
+	err := e.svc.PreflightTrash(context.Background(), paths, false)
+	if !errors.Is(err, ErrTrashUnwritable) {
+		t.Fatalf("该报错, got %v", err)
+	}
+	if n := strings.Count(err.Error(), e.disk); n != 1 {
+		t.Errorf("同一块盘该只说一次, got %d 次: %q", n, err)
+	}
+}

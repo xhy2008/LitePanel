@@ -56,6 +56,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 	"sort"
 	"strconv"
 	"strings"
@@ -812,6 +814,74 @@ func (s *Service) deletable(p string) (real, mount string, st syscall.Stat_t, er
 func (s *Service) removePermanent(real string) error {
 	if err := os.RemoveAll(real); err != nil {
 		return fmt.Errorf("永久删除 %q 失败（%v）", real, err)
+	}
+	return nil
+}
+
+// PreflightTrash 在**受理**一批删除时检查"这些盘的回收站建得起来吗"。
+//
+// 为什么需要它（而删除本身在执行时也会遇到同一个问题）：界面上"这个盘只
+// 能永久删除"那个按钮，靠的是 HTTP 层拿到 ErrTrashUnwritable 这个**哨兵**
+// （errors.Is）才亮得起来。删除改走队列之后，这个错误本来只出现在任务
+// 执行时（抽屉里一条红色记录），前端就只剩"对中文错误文本做子串匹配"一条
+// 路可走 —— 而那条路在本项目里被明令禁止：改一句文案就会把 422 变成没有。
+// 与其让前端去猜文本，不如把判定提前到受理时，让哨兵仍然走 HTTP。
+//
+// 这与"受理时顺手 stat 一下源存不存在"是两回事，不要因为看起来像就合并：
+// 源存在性会过期（检查完到 worker 执行之间文件可能被人删了），提前检查给
+// 不了任何保证；而"这块盘的回收站建得起来"是**盘的性质**，稳定得多。执行
+// 时的检查照样会跑，预检只是把一个稳定的坏消息提前说出口。
+//
+// 检查本身**不能有副作用**。这里不复用 ensureTrashDir：它会 MkdirAll +
+// Chmod，把"检查"做成"顺手改一下盘"，用户会因为只是想删个文件而看到回收站
+// 目录的权限与 ctime 在变。用 access(2)：只问不写，也不创建。
+//
+// 按**盘**去重是它便宜的前提：按文件查的话，框选 10 万个路径就是 10 万次
+// 系统调用，为了提前报错付出的代价比删除本身还高。
+func (s *Service) PreflightTrash(ctx context.Context, paths []string, permanent bool) error {
+	// permanent=true 根本不碰回收站，拦它等于死锁：盘根写不进去 + 唯一
+	// 可行的删除方式被自己的前置检查拒掉 = 这个盘上一个文件都删不了。
+	if permanent {
+		return nil
+	}
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		mount, err := s.fsRoot(p)
+		if err != nil {
+			// 认不出在哪块盘上：不在这里下结论。执行时会用同一套解析
+			// 再判一次，那时报的是"这个路径本身有问题"，比这里瞎猜
+			// "回收站不可写"诚实。
+			continue
+		}
+		if seen[mount] {
+			continue
+		}
+		seen[mount] = true
+		if err := s.trashWritable(mount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trashWritable 回答"这个盘的回收站现在能用吗"，不改变盘上任何东西。
+func (s *Service) trashWritable(mount string) error {
+	trash := s.trashRoot(mount)
+	// 目标目录取"回收站本身"或"盘根"两者中真正要写的那个：回收站还不存在
+	// 时，要写成功的是**盘根**（mkdir 落在盘根上）；已经存在时，要写的是
+	// 回收站目录本身。判错对象的两种后果都是假的：拿盘根去判一个已存在
+	// 但被收紧成只读的回收站 = 漏报；拿回收站去判一个还不存在的回收站 =
+	// 因为 ENOENT 而误报。
+	target := mount
+	if fi, err := os.Lstat(trash); err == nil && fi.IsDir() {
+		target = trash
+	}
+	if err := unix.Access(target, unix.W_OK); err != nil {
+		return fmt.Errorf("%w: %s 这个盘写不进回收站（%s，%v）；这个盘上的文件只能永久删除，或用 SFTP 移走",
+			ErrTrashUnwritable, mount, s.trashDirName, err)
 	}
 	return nil
 }

@@ -606,12 +606,11 @@ func (s stubFiles) PutChunk(context.Context, filemgr.UploadChunk) (filemgr.Uploa
 func (s stubFiles) UploadStatus(context.Context, string) (filemgr.UploadState, error) {
 	return filemgr.UploadState{}, s.err
 }
-func (s stubFiles) AbortUpload(context.Context, string) error               { return s.err }
-func (s stubFiles) DeleteMany(context.Context, []string, bool) (int, error) { return 0, s.err }
-func (s stubFiles) ListTrash(context.Context) ([]filemgr.TrashItem, error)  { return nil, s.err }
-func (s stubFiles) RestoreTrash(context.Context, string) (string, error)    { return "", s.err }
-func (s stubFiles) PurgeTrash(context.Context, string) error                { return s.err }
-func (s stubFiles) EmptyTrash(context.Context) (int, error)                 { return 0, s.err }
+func (s stubFiles) AbortUpload(context.Context, string) error              { return s.err }
+func (s stubFiles) ListTrash(context.Context) ([]filemgr.TrashItem, error) { return nil, s.err }
+func (s stubFiles) RestoreTrash(context.Context, string) (string, error)   { return "", s.err }
+func (s stubFiles) PurgeTrash(context.Context, string) error               { return s.err }
+func (s stubFiles) EmptyTrash(context.Context) (int, error)                { return 0, s.err }
 
 // 未知错误必须是 500，不能图省事归成 400。
 //

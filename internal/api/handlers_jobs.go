@@ -34,6 +34,12 @@ type Jobs interface {
 	CreateJob(ctx context.Context, in filemgr.JobInput) (filemgr.Job, error)
 	ListJobs(ctx context.Context, f filemgr.JobFilter) ([]filemgr.Job, error)
 	RequestCancelJob(ctx context.Context, id int64) error
+	// PreflightTrash 在受理删除时检查各盘的回收站建得起来。
+	//
+	// 它存在的唯一理由是让 ErrTrashUnwritable 继续走 **HTTP 状态码**而不
+	// 是退化进任务错误文本：界面上"这个盘只能永久删除"那个按钮靠这个哨兵
+	// 才亮得起来，而让前端对中文文案做子串匹配在本项目里是禁止的。
+	PreflightTrash(ctx context.Context, paths []string, permanent bool) error
 }
 
 var _ Jobs = (*filemgr.Service)(nil)
@@ -63,6 +69,15 @@ func handleFSJobSubmit(svc Jobs) http.HandlerFunc {
 		// dst 尾部斜杠先剥掉：前端"进入目录后粘贴"很容易交出 /a/b/，而它
 		// 会一路拼成 /a/b//name。路径本身合法，但界面上给用户看的目标
 		// 出现双斜杠像是拼错了。
+		// 删除类任务先做一次回收站预检（理由见 Jobs.PreflightTrash）。
+		// 只对 delete 做：copy/move 的目标是用户指定的目录，那里的可写性
+		// 由执行时的目标校验负责，与回收站无关。
+		if filemgr.JobOp(in.Op) == filemgr.OpDelete {
+			if err := svc.PreflightTrash(r.Context(), in.Paths, in.Permanent); err != nil {
+				writeJobError(w, err)
+				return
+			}
+		}
 		j, err := svc.CreateJob(r.Context(), filemgr.JobInput{
 			Op:        filemgr.JobOp(in.Op),
 			Src:       in.Paths,

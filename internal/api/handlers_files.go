@@ -39,9 +39,11 @@ type Files interface {
 	UploadStatus(ctx context.Context, id string) (filemgr.UploadState, error)
 	AbortUpload(ctx context.Context, id string) error
 
-	// 回收站（设计 8.6 / D12，按盘分置）。DeleteMany 是界面上的"删除"：
-	// permanent=false 移进各盘自己的回收站，true 直接永久删除。
-	DeleteMany(ctx context.Context, paths []string, permanent bool) (int, error)
+	// 回收站（设计 8.6 / D12，按盘分置）。删除本身不在这里了 —— 界面上的
+	// "删除"现在是一条 op=delete 的任务（走 deps.Jobs，见 handlers_trash.go
+	// 与 handlers_jobs.go）。Files 只留回收站的查看/还原/清空这些即时读与
+	// 小操作；把 DeleteMany 从这个接口摘掉，是为了不让每个替身都还被迫
+	// 实现一个没有任何 handler 会调的方法（死接口面会替实现撒谎）。
 	ListTrash(ctx context.Context) ([]filemgr.TrashItem, error)
 	RestoreTrash(ctx context.Context, id string) (string, error)
 	PurgeTrash(ctx context.Context, id string) error
@@ -207,7 +209,7 @@ func handleFSRename(svc Files) http.HandlerFunc {
 // writeFSError 把 filemgr 的领域错误翻成状态码。
 //
 // ctx 取消必须在领域错误之前、且在 fs.ErrNotExist 之前判：批量删除跑到
-// 一半用户关掉标签页时，DeleteMany 回的就是 context.Canceled（领域层每条
+// 一半用户关掉标签页时，同步删除回的就是 context.Canceled（领域层每条
 // 都查 ctx）。不映射会掉进 default 变 500 "文件系统操作失败" —— 而面板
 // 什么都没做错，是客户端自己走的；这个区分是反代日志里唯一能看出真相的
 // 地方。取值与 handlers_upload.go 对齐（499，nginx 的 "client closed
