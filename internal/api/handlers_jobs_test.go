@@ -493,3 +493,67 @@ func (h *jobsHarness) submit(t *testing.T, body string) int64 {
 }
 
 var _ = time.Second
+
+// ---------- POST /api/fs/jobs/{id}/retry ----------
+
+// 重试一条 interrupted 任务：受理回新状态、任务回到 pending。
+func TestJobsRetryInterrupted(t *testing.T) {
+	h := setUpJobs(t)
+	a := h.mk("x.txt", "1")
+	// 建一条任务并手工标成 interrupted（不起池，受理后就停在那）
+	res := h.post("/api/fs/jobs", `{"op":"delete","paths":[`+jq(a)+`]}`)
+	id := decodeJob(t, res).ID
+	if _, err := h.db.SqlDB().Exec(`UPDATE fs_jobs SET state='interrupted' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	rr := h.post(fmt.Sprintf("/api/fs/jobs/%d/retry", id), "")
+	defer rr.Body.Close()
+	if rr.StatusCode != http.StatusOK {
+		t.Fatalf("重试该 200, got %d", rr.StatusCode)
+	}
+	got := h.list(t)
+	for _, j := range got {
+		if j.ID == id && j.State != filemgr.JobPending {
+			t.Errorf("重试后该回到 pending, got %s", j.State)
+		}
+	}
+}
+
+// 重试非 interrupted 的任务回 409，不存在的回 404。
+//
+// 与取消端点同一套码：done/canceled 再跑一次只会造出假失败（撞自己的
+// 产物），pending/running 再排队会造出同一批文件的第二个执行者。
+func TestJobsRetryStatusCodes(t *testing.T) {
+	h := setUpJobs(t)
+	if res := h.post("/api/fs/jobs/999999/retry", ""); res.StatusCode != http.StatusNotFound {
+		defer res.Body.Close()
+		t.Errorf("不存在的任务该 404, got %d", res.StatusCode)
+	}
+	a := h.mk("y.txt", "1")
+	res := h.post("/api/fs/jobs", `{"op":"delete","paths":[`+jq(a)+`]}`)
+	id := decodeJob(t, res).ID // pending
+	term := h.post(fmt.Sprintf("/api/fs/jobs/%d/retry", id), "")
+	defer term.Body.Close()
+	if term.StatusCode != http.StatusConflict {
+		t.Errorf("pending 任务不该能重试, got %d", term.StatusCode)
+	}
+	if res := h.post("/api/fs/jobs/abc/retry", ""); res.StatusCode != http.StatusBadRequest {
+		defer res.Body.Close()
+		t.Errorf("非数字 id 该 400, got %d", res.StatusCode)
+	}
+}
+
+// 重试端点也要 CSRF + 登录。
+func TestJobsRetryRequiresCSRF(t *testing.T) {
+	h := setUpJobs(t)
+	res := h.do("POST", "/api/fs/jobs/1/retry", true, "", "", "")
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("缺 CSRF 头该 403, got %d", res.StatusCode)
+	}
+	res2 := h.do("POST", "/api/fs/jobs/1/retry", false, csrf, "", "")
+	res2.Body.Close()
+	if res2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("未登录该 401, got %d", res2.StatusCode)
+	}
+}

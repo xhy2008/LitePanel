@@ -637,3 +637,6 @@ func (s stubJobs) ListJobs(context.Context, filemgr.JobFilter) ([]filemgr.Job, e
 }
 func (s stubJobs) RequestCancelJob(context.Context, int64) error        { return s.err }
 func (s stubJobs) PreflightTrash(context.Context, []string, bool) error { return s.err }
+func (s stubJobs) RetryJob(context.Context, int64) (filemgr.Job, error) {
+	return filemgr.Job{}, s.err
+}

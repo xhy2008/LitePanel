@@ -168,6 +168,7 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Post("/fs/jobs", authed(handleFSJobSubmit(deps.Jobs)))
 			a.Get("/fs/jobs", authed(handleFSJobList(deps.Jobs)))
 			a.Delete("/fs/jobs/{id}", authed(handleFSJobCancel(deps.Jobs)))
+			a.Post("/fs/jobs/{id}/retry", authed(handleFSJobRetry(deps.Jobs)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

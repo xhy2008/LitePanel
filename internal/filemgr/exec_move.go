@@ -96,6 +96,19 @@ func (s *Service) movePath(ctx context.Context, src, dstDir string, report progr
 // 最坏的结果 —— 界面报了一条错，而实际上有几个文件已经搬走了，用户既看不出
 // 是哪几个、也没法回退（移动不像删除有回收站兜着）。
 func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, report progressFunc) (int, error) {
+	return s.moveMany(ctx, srcs, dstDir, report, false)
+}
+
+// moveMany 是 MoveMany 的内核，resumed 表明这是重试跑。
+//
+// 为什么要这个参数（而且为什么不是直接读 Job.Resumed）：移动的中断点比
+// copy/delete 多一个——跨盘时"副本已校验、源未删"，盘上源与目标各有一份。
+// 重跑必须认出这个状态并只补上删源；而全新一次移动撞同名目标必须照旧
+// 409。两种情形在盘上长得一样，"是不是重试"是唯一分界（见 0008 迁移）。
+//
+// 参数而不是从 ctx 里掏：调用方只有 runJob 一个，它手里就有完整的 Job,
+// 拼参数比建一个隐式上下文通道便宜，而且谁在改这个值一眼可见。
+func (s *Service) moveMany(ctx context.Context, srcs []string, dstDir string, report progressFunc, resumed bool) (int, error) {
 	if len(srcs) == 0 {
 		return 0, fmt.Errorf("%w: 没有要移动的路径", ErrBadPath)
 	}
@@ -106,16 +119,32 @@ func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, re
 	if err != nil {
 		return 0, err
 	}
-	// 第一遍：解析 + 存在性 + 撞名，全部通过才动手。
-	type plan struct{ src, dst string }
-	plans := make([]plan, 0, len(srcs))
-	seen := make(map[string]bool, len(srcs)) // 目标侧重名（同一批里两个同名源）
+	// 第一遍：解析 + 存在性 + 撞名，全部通过才动手（与 DeleteMany 同一条
+	// 纪律）。planned 里只放"这一轮要真动手"的条目。
+	type plan struct {
+		src, dst string
+		// finishDeleteSrc：跨盘副本已在且与源一致，只差补最后一步删源。
+		// 只有 resumed 且校验通过才会置位。
+		finishDeleteSrc bool
+	}
+	var plans []plan
+	seen := make(map[string]bool, len(srcs))
+	// done 从"上一轮已经搬完、这轮无需再动"的条目数起算。它们仍计入返回值：
+	// 用户重试后要看到"10 个都搬完了"，而不是"只搬了 7 个"（那 3 个他会去找）。
+	done := 0
 	for _, p := range srcs {
-		srcReal, err := s.resolveSrcPath(p)
+		srcReal, missing, err := s.resolveMoveSrcAllowMissing(p)
 		if err != nil {
 			return 0, err
 		}
 		dst := filepath.Join(dstDirReal, filepath.Base(srcReal))
+		if missing {
+			// 源不见了。只有 resumed 能走到这里（非 resumed 时解析器直接
+			// 回 fs.ErrNotExist）。源的消失只可能是上一轮把它搬走了：同盘
+			// rename 与"跨盘删源"都是各自的最后一步，源没了即已完成。
+			done++
+			continue
+		}
 		if dst == srcReal {
 			return 0, fmt.Errorf("%w: 源与目标相同 (%s)", ErrBadPath, srcReal)
 		}
@@ -127,17 +156,45 @@ func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, re
 			return 0, fmt.Errorf("%w: 这一批里有两个条目都叫 %s", ErrExists, filepath.Base(dst))
 		}
 		seen[dst] = true
-		if _, err := os.Lstat(dst); err == nil {
+		_, dstErr := os.Lstat(dst)
+		switch {
+		case dstErr == nil && resumed:
+			// 重跑撞见同名目标。不能一律当"上一轮的产物"——也可能是用户
+			// 自己放的同名文件。先校验：两边内容一致才说明"复制+校验"确实
+			// 做完了、只差删源，那就只补删源。校验不过说明这个 dst 不是我
+			// 们的产物（或已损坏），报错且两边都不动（见文件头三种错法）。
+			ok, verr := s.resumedCopyMatches(ctx, srcReal, dst)
+			if verr != nil {
+				return 0, verr
+			}
+			if !ok {
+				return 0, fmt.Errorf("%w: %s 已存在且内容与源不一致，不敢替你选哪一份（源 %s 未动）",
+					ErrExists, dst, srcReal)
+			}
+			plans = append(plans, plan{src: srcReal, dst: dst, finishDeleteSrc: true})
+		case dstErr == nil:
 			return 0, fmt.Errorf("%w: %s", ErrExists, dst)
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return 0, fmt.Errorf("检查目标 %s 失败: %w", dst, err)
+		case !errors.Is(dstErr, fs.ErrNotExist):
+			return 0, fmt.Errorf("检查目标 %s 失败: %w", dst, dstErr)
+		default:
+			plans = append(plans, plan{src: srcReal, dst: dst})
 		}
-		plans = append(plans, plan{srcReal, dst})
 	}
-	n := 0
+	n := done
 	for _, pl := range plans {
 		if err := ctx.Err(); err != nil {
 			return n, err
+		}
+		if pl.finishDeleteSrc {
+			// 副本已校验过（就在上面第一遍里比过内容），只差补删源这一步。
+			if err := s.deleteSrcAfterCopy(ctx, pl.src, pl.dst); err != nil {
+				return n, err
+			}
+			n++
+			if err := report(0, n); err != nil {
+				return n, err
+			}
+			continue
 		}
 		sameFS, err := s.sameFS(pl.src, dstDirReal)
 		if err != nil {
@@ -157,8 +214,48 @@ func (s *Service) MoveMany(ctx context.Context, srcs []string, dstDir string, re
 			return n, err2
 		}
 		n++
+		if err := report(0, n); err != nil {
+			return n, err
+		}
 	}
 	return n, nil
+}
+
+// resumedCopyMatches 判断"重跑时目标已存在"是不是上一轮复制好的产物。
+//
+// 普通文件比内容（sha256，复用 verifyFilesMatch）。目录要整棵比（verifyTree）。
+// 符号链接比链接目标。任何一条比不出来（读错误等）都回错误，让调用方报错
+// 而不是猜——两边都还在盘上，猜错的代价是删掉用户的原件。
+func (s *Service) resumedCopyMatches(ctx context.Context, src, dst string) (bool, error) {
+	srcFI, err := os.Lstat(src)
+	if err != nil {
+		return false, err
+	}
+	dstFI, err := os.Lstat(dst)
+	if err != nil {
+		return false, err
+	}
+	// 类型不一致（一个是目录一个不是，或链接 vs 普通文件）：不是我们的产物。
+	if srcFI.Mode().Type() != dstFI.Mode().Type() {
+		return false, nil
+	}
+	switch {
+	case srcFI.Mode()&fs.ModeSymlink != 0:
+		a, e1 := os.Readlink(src)
+		b, e2 := os.Readlink(dst)
+		if e1 != nil || e2 != nil {
+			return false, fmt.Errorf("比较符号链接 %s 与 %s: %v/%v", src, dst, e1, e2)
+		}
+		return a == b, nil
+	case srcFI.IsDir():
+		return s.verifyTree(ctx, src, dst)
+	case srcFI.Mode().IsRegular():
+		return s.verifyFilesMatch(ctx, src, dst)
+	default:
+		// 特殊文件（FIFO 等）：moveCrossDisk 本来就不会复制它，走到这里
+		// 说明盘上状态诡异，报"比不出来"而不是"一样"。
+		return false, nil
+	}
 }
 
 // ---------- 同盘 rename ----------
@@ -432,4 +529,26 @@ func (s *Service) resolveDstDir(p string) (string, error) {
 func srcIsDir(real string) bool {
 	fi, err := os.Stat(real)
 	return err == nil && fi.IsDir()
+}
+
+// resolveMoveSrcAllowMissing 与 resolveSrcPath 相同，但源不存在时不报错，
+// 而是回 (原始路径, missing=true, nil)。只有重试路径用它：重跑时被中断的
+// 那一轮可能已经把某个源搬走了，那种"缺失"是**已完成**的证据而不是错误。
+//
+// 返回值在 missing 时是清理过的绝对路径（没有 srcReal 可拼 basename）。
+// 非重试路径继续用 resolveSrcPath：全新一次移动里源不存在就是 404，那是
+// 用户要的答案。
+func (s *Service) resolveMoveSrcAllowMissing(p string) (string, bool, error) {
+	real, err := s.resolveSrcPath(p)
+	if err == nil {
+		return real, false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", false, err
+	}
+	full, aerr := AbsClean(p)
+	if aerr != nil {
+		return "", false, err // 报原来那个 ErrNotExist 更有信息量
+	}
+	return full, true, nil
 }

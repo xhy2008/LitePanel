@@ -118,7 +118,13 @@ type Job struct {
 	// 与 cancel_requested 同类——都是"用户已做出的、不可从盘上重新推断的
 	// 决定"，必须落盘（理由见 0007 迁移：排队中崩了，重启不能把永久
 	// 删除偷换成可还原，也不能反过来吃掉唯一的后悔药）。
-	Permanent bool   `json:"permanent"`
+	Permanent bool `json:"permanent"`
+	// Resumed 为真表示这条任务是从 interrupted 重试来的（见 0008 迁移）。
+	// 只有 move 的执行体会读它：跨盘移动可能中断在"副本已校验、源未删",
+	// 那时源与目标各有一份内容相同的文件，重跑要认出这个状态并只补删源,
+	// 而全新一次移动撞同名目标必须照旧 409；两者在盘上无法区分，
+	// "是不是重试"正是唯一的分界。
+	Resumed   bool   `json:"resumed"`
 	Error     string `json:"error,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
@@ -240,7 +246,7 @@ func (s *Service) GetJob(ctx context.Context, id int64) (Job, error) {
 // jobSelect 是共用的读列。列名与顺序必须和 scanJob 一一对上，所以只写
 // 一份：两处各列一遍，加列时漏一处会得到错位的数据而不是报错。
 const jobSelect = `SELECT id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
-	state,cancel_requested,permanent,COALESCE(error,''),created_at,updated_at FROM fs_jobs`
+	state,cancel_requested,permanent,resumed,COALESCE(error,''),created_at,updated_at FROM fs_jobs`
 
 // ListJobs 列举：进行中的**全部** + 最近 maxJobHistory 条终态。
 //
@@ -381,7 +387,7 @@ func (s *Service) claimJob(ctx context.Context) (Job, error) {
 		 WHERE id = (SELECT id FROM fs_jobs WHERE state='pending' ORDER BY id LIMIT 1)
 		 RETURNING `+jobReturningCols, now).
 		Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
-			&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent,
+			&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent, &j.Resumed,
 			&eerr, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, sql.ErrNoRows
@@ -402,7 +408,7 @@ func (s *Service) claimJob(ctx context.Context) (Job, error) {
 // jobReturningCols 是 jobSelect 的列清单在 RETURNING 里的形态。
 // 与 jobSelect 同一批列、同一顺序（共用 scan 顺序）。
 const jobReturningCols = `id,op,src,dst,total_bytes,done_bytes,entries_total,entries_done,
-	state,cancel_requested,permanent,COALESCE(error,''),created_at,updated_at`
+	state,cancel_requested,permanent,resumed,COALESCE(error,''),created_at,updated_at`
 
 // setJobProgress 写进度。节流策略在执行侧（设计：每 200ms 或每 4MB），
 // 这里只负责"写了就能读到"。
@@ -488,7 +494,7 @@ func scanJob(r rowScanner) (Job, error) {
 		eerr  sql.NullString
 	)
 	if err := r.Scan(&j.ID, &j.Op, &src, &dst, &j.TotalBytes, &j.DoneBytes,
-		&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent,
+		&j.EntriesTotal, &j.EntriesDone, &state, &j.CancelRequested, &j.Permanent, &j.Resumed,
 		&eerr, &j.CreatedAt, &j.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, fmt.Errorf("%w", ErrNoJob)

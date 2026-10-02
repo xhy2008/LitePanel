@@ -762,3 +762,86 @@ func TestJobStateSetMatchesSchema(t *testing.T) {
 		}
 	}
 }
+
+// mustInterrupted 建一条任务并把它标成 interrupted（模拟跑到一半面板被杀）。
+func (e *jobEnv2) mustInterrupted(t testing.TB, in JobInput) Job {
+	t.Helper()
+	j, err := e.svc.CreateJob(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.SqlDB().Exec(`UPDATE fs_jobs SET state='interrupted' WHERE id=?`, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	j.State = JobInterrupted
+	return j
+}
+
+// runOnePending 把 interrupted 放回队列之后，手工驱动一次领取 + 执行。
+//
+// 不起常驻 worker 池是有意省事：这些用例关心的是"重跑时怎么对待半截的
+// 盘上状态"，与谁去领它无关。
+func (e *jobEnv2) runOnePending(t testing.TB) {
+	t.Helper()
+	if !e.svc.StartJobs(context.Background()) {
+		// 起不起来都可能：有的用例已经起过。重复调用回 false 而不报错，
+		// 所以这里不能把 false 当失败。
+		_ = 0
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := e.svc.ListJobs(context.Background(), JobFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := false
+		for _, j := range jobs {
+			if j.State == JobPending || j.State == JobRunning {
+				active = true
+			}
+		}
+		if !active {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("队列里的任务没跑完")
+}
+
+// mustGet 读一条任务，读不到就直接失败（重试用例里到处要用）。
+func (e *jobEnv2) mustGet(t testing.TB, id int64) Job {
+	t.Helper()
+	j, err := e.svc.GetJob(context.Background(), id)
+	if err != nil {
+		t.Fatalf("读任务 %d: %v", id, err)
+	}
+	return j
+}
+
+// retry 把任务放回队列（失败就直接失败：整个用例的前提）。
+func (e *jobEnv2) retry(t testing.TB, id int64) {
+	t.Helper()
+	if _, err := e.svc.RetryJob(context.Background(), id); err != nil {
+		t.Fatalf("重试 %d: %v", id, err)
+	}
+}
+
+// resumed 列存在且默认 0（迁移 0008）。
+//
+// 默认必须是 0：默认 1 会让每一条全新提交的 move 都以为自己是重试，
+// 于是撞见任何同名目标都先试"补删源"，把用户自己的文件当成上一轮的产物
+// 删掉。这跟 permanent 默认必须是 0 是同一类护栏。
+func TestJobsResumedColumnDefaultsZero(t *testing.T) {
+	db := openStoreForJobs(t)
+	if _, err := db.Exec(`INSERT INTO fs_jobs(op,src,dst,entries_total,state,created_at,updated_at)
+		VALUES('move','["/a"]','/d',1,'pending',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	var r int
+	if err := db.QueryRow(`SELECT resumed FROM fs_jobs LIMIT 1`).Scan(&r); err != nil {
+		t.Fatalf("resumed 列不存在: %v", err)
+	}
+	if r != 0 {
+		t.Errorf("resumed 默认该是 0（全新提交不是重试）, got %d", r)
+	}
+}

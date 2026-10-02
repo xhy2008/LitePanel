@@ -48,7 +48,7 @@ func (s *Service) runCopy(ctx context.Context, j Job, report progressFunc) error
 // 直接复用 MoveMany：它已经实现了"先全量校验再动手"的纪律（部分成功是移动
 // 最坏的结果——没有回收站兜着，用户既不知道搬走了哪几个也退不回去）。
 func (s *Service) runMove(ctx context.Context, j Job, report progressFunc) error {
-	_, err := s.MoveMany(ctx, j.Src, j.Dst, report)
+	_, err := s.moveMany(ctx, j.Src, j.Dst, report, j.Resumed)
 	return err
 }
 

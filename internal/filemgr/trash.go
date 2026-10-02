@@ -740,13 +740,46 @@ func (s *Service) deleteMany(ctx context.Context, paths []string, permanent bool
 		return 0, err
 	}
 	// 第一遍：把每条解析成确定路径并确认可删除（存在 + 不是回收站自身）。
+	//
+	// 其中"源不见了"这一条有个例外，只为**重跑被中断的任务**而存在：上次
+	// 跑到一半已经把这个文件送进回收站，原路径自然空了，照原样再跑一遍会
+	// 在第 1 个条目上撞"file does not exist"，于是那个"一键重试"按钮永远
+	// 点不动。放行它的证据必须硬：回收站里**有**一条 origin 指向这个路径。
+	// 光看"原路径没了"不够 —— 也可能是用户自己在别处删了它，那种情况要
+	// 照旧报错，否则等于把一次数据丢失盖章成"删除成功"。
+	//
+	// 判据放在执行体里而不是给任务加一个"重试模式"开关，是因为这个分支
+	// 只有在上次的产物已经把源吃掉时才会走到：全新一次提交里源必然还在，
+	// 条件不成立。少一个贯穿三层的状态位，就少一处会漂的地方。
 	targets := make([]string, 0, len(paths))
+	// 扫回收站是贵操作，等真的碰到缺失的源再说。
+	var trashed map[string]bool
 	for _, p := range paths {
 		real, _, _, err := s.deletable(p)
-		if err != nil {
+		if err == nil {
+			targets = append(targets, real)
+			continue
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
 			return 0, err
 		}
-		targets = append(targets, real)
+		// missing 单独留一份：下面扫回收站会用到 err 这个变量名，复用它
+		// 会把"要回报给调用方的那个错"覆盖成 nil —— 于是"没有证据、该
+		// 失败"的分支实际 return 0, nil，把一个失踪的文件盖章成删除成功。
+		// （实测过：正是这条把 TestRetryDeleteMissingWithoutEvidenceFails
+		// 从 failed 变成 done。）
+		missing := err
+		if trashed == nil {
+			t2, terr := s.trashedOrigins(ctx)
+			if terr != nil {
+				return 0, terr
+			}
+			trashed = t2
+		}
+		abs, aerr := AbsClean(p)
+		if aerr != nil || !trashed[abs] {
+			return 0, missing // 没有"已经进回收站"的证据，照旧失败
+		}
 	}
 	n := 0
 	for _, t := range targets {
@@ -884,4 +917,23 @@ func (s *Service) trashWritable(mount string) error {
 			ErrTrashUnwritable, mount, s.trashDirName, err)
 	}
 	return nil
+}
+
+// trashedOrigins 列出回收站里所有条目的原路径（一次扫盘，返回集合）。
+//
+// 只在"有源不见了"时才被调用（见 deleteMany），所以正常路径上一次扫盘都
+// 不会发生。反过来说它的代价确实高（遍历各盘回收站目录 + 逐个读 meta），
+// 因此**不能**挪到每次删除的必经之路上。
+func (s *Service) trashedOrigins(ctx context.Context) (map[string]bool, error) {
+	out := make(map[string]bool)
+	err := s.forEachEntry(ctx, func(e entryRef) error {
+		if e.item.Origin != "" {
+			out[e.item.Origin] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

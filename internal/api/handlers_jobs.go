@@ -34,6 +34,7 @@ type Jobs interface {
 	CreateJob(ctx context.Context, in filemgr.JobInput) (filemgr.Job, error)
 	ListJobs(ctx context.Context, f filemgr.JobFilter) ([]filemgr.Job, error)
 	RequestCancelJob(ctx context.Context, id int64) error
+	RetryJob(ctx context.Context, id int64) (filemgr.Job, error)
 	// PreflightTrash 在受理删除时检查各盘的回收站建得起来。
 	//
 	// 它存在的唯一理由是让 ErrTrashUnwritable 继续走 **HTTP 状态码**而不
@@ -176,5 +177,25 @@ func writeJobError(w http.ResponseWriter, err error) {
 			"后台任务队列不可用", err.Error())
 	default:
 		writeFSError(w, err)
+	}
+}
+
+// handleFSJobRetry 处理 POST /api/fs/jobs/{id}/retry（设计 712 行）。
+//
+// 只有 interrupted 能重试；其余终态与在跑的都回 409（理由见领域层
+// RetryJob 与测试）。id 非数字回 400 与取消端点一致。
+func handleFSJobRetry(svc Jobs) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := chiID(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "任务 id 必须是数字")
+			return
+		}
+		j, err := svc.RetryJob(r.Context(), id)
+		if err != nil {
+			writeJobError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, jobResponse{Job: j, JobID: j.ID})
 	}
 }
