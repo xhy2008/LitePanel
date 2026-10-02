@@ -169,3 +169,28 @@ func TestFileJobsStopNeverLeavesRunning(t *testing.T) {
 		}
 	}
 }
+
+// deps.Files 与 deps.Jobs 必须是**同一个**实例。
+//
+// 装配层现在有两个出口指向同一个东西，而"顺手再 new 一个"看起来无害：编译
+// 过、测试过、任务也确实会跑。坏在它坏得很有耐心 —— HTTP 处理器提交任务后
+// kick 的是实例 A 的唤醒通道，而在跑任务的是实例 B 的 worker（它没被任何人
+// 唤醒），于是每条任务都要等到 30 秒兜底 tick 才被领走。用户看到的是"面板
+// 有点卡"，运维看到的是"一切正常"，日志里一个字都不会有。
+//
+// 这种"能跑但慢得没道理"的错，唯一便宜的封法就是钉住同一性本身。
+func TestDepsFilesAndJobsAreSameInstance(t *testing.T) {
+	db := openTestDB(t)
+	deps := buildDeps(db, config.Defaults(), ws.NewHub(), false, nil)
+	a, ok := deps.Files.(*filemgr.Service)
+	if !ok {
+		t.Fatalf("Files 类型不对: %T", deps.Files)
+	}
+	b, ok := deps.Jobs.(*filemgr.Service)
+	if !ok {
+		t.Fatalf("Jobs 类型不对: %T", deps.Jobs)
+	}
+	if a != b {
+		t.Error("Files 与 Jobs 是两个实例：提交任务的唤醒信号送不到干活的 worker，每条任务都会白等一个兜底轮询周期")
+	}
+}

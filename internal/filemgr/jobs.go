@@ -60,6 +60,23 @@ const (
 	JobInterrupted JobState = "interrupted"
 )
 
+// Valid 报告这是不是一个已知的任务状态。
+//
+// 导出是为了 HTTP 层能拒掉非法的 ?state= 而不是静默回全部（静默会让筛选
+// 变成"看着能用而结果永远是全部"）。
+//
+// 这份枚举与 0006 迁移里 fs_jobs.state 的 CHECK 是同一套值，两处必须同步：
+// 加了新状态而忘了改这里，GET ?state=新状态 会被自己的校验拒掉（抽屉里
+// 永远看不到这类任务）；只改这里而忘了改 CHECK，则是能查一个库里根本存不
+// 下来的值。TestJobStateSetMatchesSchema 把两边钉在一起。
+func (s JobState) Valid() bool {
+	switch s {
+	case JobPending, JobRunning, JobDone, JobFailed, JobCanceled, JobInterrupted:
+		return true
+	}
+	return false
+}
+
 // terminal 报告该状态是否已终态（不再有 worker 会动它）。
 func (s JobState) terminal() bool {
 	switch s {

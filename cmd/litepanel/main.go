@@ -276,6 +276,7 @@ func bootServices(ctx context.Context, sup *service.Supervisor, db *store.DB) er
 
 // buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。
 func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io.Writer) api.AuthDeps {
+	files := newFileService(db, cfg)
 	return api.AuthDeps{
 		DB:       db,
 		Hub:      hub,
@@ -302,22 +303,13 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 被 GC 认出来（TTL 找不到它，等于永久占盘）。
 		// 选 db 同级：那里必然可写（面板正在往那里写 SQLite），且必然
 		// 属于面板自己，不会出现在用户的数据目录里。
-		Files: filemgr.NewService(filemgr.Options{
-			// 没接这个的后果不是报错而是静默降级：fs 任务端点仍在、job_id
-			// 照发、界面转"排队中"，而永远不会有文件被动过。它跟 DB 传否
-			// 直接挂钩，所以归 buildDeps 自己负责（与 Files/UploadRoot 同一
-			// 条理由：不让"接没接"取决于 main 有没有被跑到）。
-			DB: db,
-			// 并发上限来自配置（设计 858：默认 2）。能走到这里的零值只会是
-			// "没写这一项"（配置层已经拒掉了显式的 0）。
-			JobConcurrency: cfg.JobConcurrency,
-			UploadRoot:     uploadRootFor(cfg.DBPath),
-			// 回收站按盘分置：这里给的是**目录名**（每个盘根下各建
-			// 一个），不是某个绝对路径 —— cfg 里那个键以前叫
-			// trash_path，绝对路径的语义已经没了（config 会拒绝旧键）。
-			TrashDirName: cfg.TrashDirName,
-			TrashRetain:  time.Duration(cfg.TrashRetainDays) * 24 * time.Hour,
-		}),
+		Files: files,
+		// 与 Files 是**同一个**实例，不是第二个。另 new 一个会出现一个
+		// 极难查的形态：HTTP 提交任务后 kick 的是实例 A 的唤醒通道，而在
+		// 跑任务的是实例 B 的 worker —— 任务不是不动，而是**要等 30 秒
+		// 兜底 tick 才动**。"能跑但慢得没道理"比完全不跑更难被发现，
+		// 用户只会说"面板有点卡"。
+		Jobs: files,
 	}
 }
 
@@ -394,4 +386,26 @@ func fatal(format string, args ...any) {
 	// systemctl status 是一片空白。stderr 归 journald，面板仍不落文件。
 	fmt.Fprintf(os.Stderr, "litepanel: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// newFileService 装配文件管理 + 任务队列那个唯一的实例。
+//
+// 具名而不是内联在字面量里，是因为它有**两个**出口（deps.Files 与
+// deps.Jobs）—— 内联的话"两个字段必须同源"这件事就只能靠读者自觉，
+// 而拼错成再 new 一次的后果见上面 Jobs 那条注释。
+func newFileService(db *store.DB, cfg config.Config) *filemgr.Service {
+	return filemgr.NewService(filemgr.Options{
+		// 没接 DB 的后果不是报错而是静默降级：fs 任务端点仍在、job_id
+		// 照发、界面转"排队中"，而永远不会有文件被动过。
+		DB: db,
+		// 并发上限来自配置（设计 858：默认 2）。能走到这里的零值只会是
+		// "没写这一项"（配置层已经拒掉了显式的 0）。
+		JobConcurrency: cfg.JobConcurrency,
+		UploadRoot:     uploadRootFor(cfg.DBPath),
+		// 回收站按盘分置：这里给的是**目录名**（每个盘根下各建一个），
+		// 不是某个绝对路径 —— cfg 里那个键以前叫 trash_path，绝对路径的
+		// 语义已经没了（config 会拒绝旧键）。
+		TrashDirName: cfg.TrashDirName,
+		TrashRetain:  time.Duration(cfg.TrashRetainDays) * 24 * time.Hour,
+	})
 }

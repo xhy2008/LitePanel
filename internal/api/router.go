@@ -55,6 +55,11 @@ type AuthDeps struct {
 	// 200 + 空列表会被渲染成"这个目录是空的 / 这台机器没有磁盘"，
 	// 而真相是面板没接这个模块 —— 两者要的用户动作完全不同）。
 	Files Files
+	// Jobs 为 nil 时任务端点 501。与 Files 分成两个字段是有意的：合成一个
+	// 接口之后，每加一个任务方法，zip/upload/trash 的替身夹具全都要跟着补
+	// —— 编译器实测如此。两个字段在生产里指向同一个 *filemgr.Service，
+	// 而各自的测试只提供自己那一个。
+	Jobs Jobs
 
 	// Commands 为 nil 时快捷命令接口返回 501（同上：200 + 空列表会被渲染
 	// 成"没有任何快捷命令"，把"面板没接这个模块"说成"你还没添加过"）。
@@ -152,6 +157,17 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Post("/fs/upload", authed(handleUploadChunk(deps.Files)))
 			a.Get("/fs/upload/{uploadID}/status", authed(handleUploadStatus(deps.Files)))
 			a.Delete("/fs/upload/{uploadID}", authed(handleUploadAbort(deps.Files)))
+		}
+		// 后台任务队列（设计 709–711）。与 Files 同级而不是套在里面：
+		// Jobs 是独立字段，生产里两者同源，但装配上互不承担义务 —— 把
+		// /fs/jobs 藏在 Files 的守卫里，会让"只接了任务没接文件"这种
+		// 装配状态无法表达（反之亦然）。放在同一个 authed 组里是硬要求：
+		// 这些端点能发起删除，漏 CSRF 等于任意网页放一张图片就能让用户
+		// 的面板删他自己的文件。
+		if deps.Jobs != nil {
+			a.Post("/fs/jobs", authed(handleFSJobSubmit(deps.Jobs)))
+			a.Get("/fs/jobs", authed(handleFSJobList(deps.Jobs)))
+			a.Delete("/fs/jobs/{id}", authed(handleFSJobCancel(deps.Jobs)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

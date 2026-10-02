@@ -735,3 +735,30 @@ func TestJobPermanentRoundTrip(t *testing.T) {
 		t.Error("ListJobs 没带回 permanent（抽屉会丢这个信息）")
 	}
 }
+
+// JobState.Valid 必须与 fs_jobs.state 的 CHECK 认同一套值。
+//
+// 两份枚举分处 Go 与 SQL，没有任何机制保证同步，而漂掉的两种症状都很安静：
+// 只改了 SQL → 新状态的任务能入库却查不出来（GET ?state=新态 被自己拒掉，
+// 抽屉里永远看不见这一类）；只改了 Go → 能查一个库里根本存不下的值，
+// 界面永远回空列表。所以这里用**真实的库**去问 CHECK 收哪些值。
+func TestJobStateSetMatchesSchema(t *testing.T) {
+	db := openStoreForJobs(t)
+	all := []JobState{JobPending, JobRunning, JobDone, JobFailed, JobCanceled, JobInterrupted}
+	for _, st := range all {
+		if !st.Valid() {
+			t.Errorf("%s 该是合法状态而 Valid() 说不合法", st)
+		}
+		// 库里也得收：CHECK 拒了就说明两处漂了。
+		if _, err := db.Exec(`INSERT INTO fs_jobs(op,src,entries_total,state,created_at,updated_at)
+			VALUES('delete','["/a"]',1,?,1,1)`, string(st)); err != nil {
+			t.Errorf("库里 CHECK 拒了 %s（与 Go 侧的枚举不一致）: %v", st, err)
+		}
+	}
+	// 反向：Valid() 不许收任何 CHECK 也拒的值。
+	for _, bad := range []JobState{"", "queued", "paused", "DONE", "done "} {
+		if bad.Valid() {
+			t.Errorf("%q 不该是合法状态", bad)
+		}
+	}
+}
