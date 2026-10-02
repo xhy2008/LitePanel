@@ -57,6 +57,20 @@ export const PATHS: Record<string, string[]> = {
   video: ['M4 6h11v12H4z', 'M15 10l5-3v10l-5-3z'],
   zip: ['M14 3v5h5', 'M6 3h8l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z', 'M11 5h2', 'M11 8h2', 'M11 11h2'],
 
+  // ---- 右键菜单（设计 8.5）----
+  // 图标名从设计里的菜单项直接来：它们与上面的 file/doc/... 一组
+  // 共同被 __tests__/contextmenu.spec.ts 从实际菜单项派生钉住。
+  cut: ['M7 5l10 10', 'M17 5 7 15', 'M8 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4z', 'M16 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
+  paste: ['M9 4h6v3H9z', 'M7 5H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-1', 'M9 13h6', 'M9 17h4'],
+  terminal_run: ['M4 5h16v14H4z', 'M8 10l2 2-2 2', 'M13 14h3'],
+  properties: ['M5 4h14v16H5z', 'M8 9h8', 'M8 13h8', 'M8 17h5'],
+  upload: ['M12 20V9', 'M8 13l4-4 4 4', 'M4 6V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1'],
+  refresh: ['M20 12a8 8 0 1 1-2.3-5.7', 'M20 4v4h-4'],
+  chevron_right: ['M9 6l6 6-6 6'],
+  home: ['M4 11l8-7 8 7', 'M6 10v10h12V10'],
+  more_vert: ['M12 6h.01', 'M12 12h.01', 'M12 18h.01'],
+  error: ['M12 4l9 16H3z', 'M12 10v4', 'M12 17h.01'],
+
   // ---- 快捷命令 ----
   arrow_upward: ['M12 19V5', 'M5 12l7-7 7 7'],
   arrow_downward: ['M12 5v14', 'M19 12l-7 7-7-7'],

@@ -508,7 +508,7 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-all;
   background: color-mix(in srgb, var(--card) 60%, transparent);
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
 }

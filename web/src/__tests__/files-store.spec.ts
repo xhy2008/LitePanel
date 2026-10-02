@@ -7,6 +7,11 @@ import type { FsEntry, FsRoot, ListPage } from '../api/files';
 
 const location = { pathname: '/', search: '', assign: vi.fn() };
 
+// 每页 500 条是设计 8.1 与后端 filemgr.DefaultPageSize 共同的数：「10 万
+// 文件首屏 ≤500ms」这条验收是按它量的。只在测试里写死一次，别的地方
+// 一律引用这个常量 —— 到处硬编码的话，改一处就会得到一片假绿。
+const PAGE = 500;
+
 function entry(name: string, over: Partial<FsEntry> = {}): FsEntry {
   return {
     name, is_dir: false, is_symlink: false, size: 10, mtime: 0,
@@ -15,7 +20,7 @@ function entry(name: string, over: Partial<FsEntry> = {}): FsEntry {
 }
 
 function page(over: Partial<ListPage> = {}): ListPage {
-  return { path: '/data', page: 1, size: 200, total: 2, entries: [entry('a'), entry('b')], ...over };
+  return { path: '/data', page: 1, size: PAGE, total: 2, entries: [entry('a'), entry('b')], ...over };
 }
 
 // 记录每次请求的完整 URL，好断言查询参数（后端读的是 page/size/sort/order/show_hidden）。
@@ -101,7 +106,11 @@ describe('files store：目录加载', () => {
     const u = urls.find((x) => x.startsWith('GET /api/fs/list'));
     expect(u).toContain('path=%2Fdata');
     expect(u).toContain('page=1');
-    expect(u).toContain('size=200');
+    // 断言的是"发出去的 size 就是 store 自己的 size"这条不变量，
+    // 而不是某个魔法数：两处各写一遍数字的话，实现改了而测试跟着改,
+    // 就变成在测字面量。
+    expect(u).toContain(`size=${s.size}`);
+    expect(s.size).toBe(PAGE);
     expect(u).toContain('show_hidden=1');
   });
 

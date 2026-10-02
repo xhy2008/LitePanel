@@ -104,7 +104,7 @@ function stop(e: Event, fn: () => void) {
 }
 .ti-danger {
   background: rgba(255, 77, 79, 0.13);
-  color: var(--danger);
+  color: var(--err);
 }
 .tinfo {
   flex: 1;
@@ -125,7 +125,7 @@ function stop(e: Event, fn: () => void) {
 }
 .kb-danger {
   background: rgba(255, 77, 79, 0.16);
-  color: var(--danger);
+  color: var(--err);
 }
 .tsub {
   font-size: 11px;
@@ -158,7 +158,7 @@ function stop(e: Event, fn: () => void) {
 }
 .mvi:hover {
   background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
+  color: var(--text);
 }
 .ib {
   width: 30px;
@@ -172,9 +172,9 @@ function stop(e: Event, fn: () => void) {
 }
 .ib:hover {
   background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
+  color: var(--text);
 }
 .ib-del:hover {
-  color: var(--danger);
+  color: var(--err);
 }
 </style>

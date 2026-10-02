@@ -11,7 +11,10 @@ export interface Clipboard {
   paths: string[];
 }
 
-const DEFAULT_SIZE = 200;
+// 每页 500，与设计 8.1 及后端 filemgr.DefaultPageSize 一致。
+// 写小一个数会静默改变验收的含义：「10 万文件首屏 ≤500ms」是按每页 500
+// 量的，前端偷偷要 200 条就等于换了个更容易达标的问题来问。
+const DEFAULT_SIZE = 500;
 
 interface State {
   dir: string;

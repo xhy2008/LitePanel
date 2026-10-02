@@ -30,6 +30,10 @@
   --topbar-h: 58px;
   --tabbar-h: 56px;
   --gap: 12px;
+
+  /* 浮层投影：toast、菜单、抽屉共用一档。用令牌而不是就地写死 rgba,
+     是为了浅色主题下能换一档更淡的（见 [data-theme=light]）。 */
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='light'] {
@@ -42,4 +46,5 @@
   --text-mute: #8b93a7;
   --border: #dfe3ea;
   --border-soft: #e8ebf0;
+  --shadow: 0 8px 28px rgba(20, 30, 50, 0.16);
 }
