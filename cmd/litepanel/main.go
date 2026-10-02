@@ -276,7 +276,7 @@ func bootServices(ctx context.Context, sup *service.Supervisor, db *store.DB) er
 
 // buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。
 func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io.Writer) api.AuthDeps {
-	files := newFileService(db, cfg)
+	files := newFileService(db, cfg, hub)
 	return api.AuthDeps{
 		DB:       db,
 		Hub:      hub,
@@ -393,7 +393,7 @@ func fatal(format string, args ...any) {
 // 具名而不是内联在字面量里，是因为它有**两个**出口（deps.Files 与
 // deps.Jobs）—— 内联的话"两个字段必须同源"这件事就只能靠读者自觉，
 // 而拼错成再 new 一次的后果见上面 Jobs 那条注释。
-func newFileService(db *store.DB, cfg config.Config) *filemgr.Service {
+func newFileService(db *store.DB, cfg config.Config, hub *ws.Hub) *filemgr.Service {
 	return filemgr.NewService(filemgr.Options{
 		// 没接 DB 的后果不是报错而是静默降级：fs 任务端点仍在、job_id
 		// 照发、界面转"排队中"，而永远不会有文件被动过。
@@ -407,5 +407,9 @@ func newFileService(db *store.DB, cfg config.Config) *filemgr.Service {
 		// 语义已经没了（config 会拒绝旧键）。
 		TrashDirName: cfg.TrashDirName,
 		TrashRetain:  time.Duration(cfg.TrashRetainDays) * 24 * time.Hour,
+		// 任务状态变更推到 fsjobs 频道。漏接的表现毫无攻击性：任务照跑、
+		// HTTP 端点照返回，只是任务抽屉永远不刷新（要手动刷新页面才动）。
+		// hub 为 nil 时 BroadcastJob 回空函数，安全。
+		JobNotifier: api.BroadcastJob(hub),
 	})
 }

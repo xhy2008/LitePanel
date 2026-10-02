@@ -141,6 +141,12 @@ type Options struct {
 	// 取决于跑测试的机器，不注入的话"跨盘列举"会在某些机器上悄悄
 	// 只覆盖一个盘，测试照样绿而什么都没测。
 	TrashRoots func(ctx context.Context) ([]string, error)
+	// JobNotifier 是任务状态变更的出站钩子（装配层接 WS fsjobs 频道）。
+	// nil = 不推。放这里而不是暴露一个 Set 方法：接没接应当在 NewService
+	// 那一刻就定死，装配测试才能只调 buildDeps 来验；可变钩子会让"到底
+	// 接了哪个 hub"在运行期漂移。
+	JobNotifier func(JobProgress)
+
 	// SameFS 覆盖"两个路径是不是同一文件系统"的判定，nil = 比设备号。
 	//
 	// 移动的执行路径完全由这个布尔决定（同盘 rename vs copying + 校验 +
@@ -221,6 +227,7 @@ func NewService(opts Options) *Service {
 	} else {
 		svc.executor = svc.runJob
 	}
+	svc.jobNotifier = opts.JobNotifier
 	if opts.TrashRoots != nil {
 		svc.trashRoots = opts.TrashRoots
 	} else {
