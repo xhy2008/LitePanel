@@ -32,6 +32,9 @@ type Service struct {
 	// 路径上唯一的性能护栏，而它的效果不能用"过了多久"断言（墙钟在负载
 	// 高的机器上会漂），只能数次数。
 	progressObserver func()
+	// jobNotifier 是任务状态变更的出站钩子（装配层接 WS fsjobs 频道）。
+	// nil = 不推（没起 WS 的场合、以及绝大多数单测）。见 notify.go。
+	jobNotifier func(JobProgress)
 	// wakeInterval 是没有唤醒信号时的兜底轮询周期。导出给测试拉长，
 	// 好把"靠 tick 也能跑"与"提交后立刻跑"区分开。
 	wakeInterval time.Duration

@@ -230,6 +230,7 @@ func (s *Service) CreateJob(ctx context.Context, in JobInput) (Job, error) {
 	}
 	// 唤醒 worker 立刻来取（不等兜底 tick）。少了这一脚，刚提交的
 	// 任务会干等一个轮询周期，界面上就是"按下复制、排队中转圈转半天"。
+	s.notifyJob(ctx, id)
 	s.kick()
 	return s.GetJob(ctx, id)
 }
@@ -302,23 +303,58 @@ func (s *Service) ReconcileJobs(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	now := s.clock().Unix()
+	// 两条语句都要把改到的 id 带回来，理由不是性能而是**正确性**：
+	// 对账是批量 UPDATE，改完之后手里只有"改了几行"这个计数，没有 id。
+	// 直接照原样写下去的后果是任务状态在库里变成了 interrupted / canceled,
+	// 而前端一条通知都收不到 —— 用户重启后打开任务抽屉，看到的还是上次
+	// 崩溃前的"进行中"，重试按钮也不出现。这恰好是重启对账存在的目的
+	// （告诉用户哪些任务需要他决定），漏推等于整个功能失效。
+	// 改动行数上界是"上次在跑的并发数 + 排队中被取消的条数"，几十量级，
+	// 逐条回读推送的代价可以忽略。
 	var n int
-	r, err := db.ExecContext(ctx,
-		`UPDATE fs_jobs SET state='interrupted', updated_at=? WHERE state='running'`, now)
+	ids, err := reconcileExec(ctx, db, now)
 	if err != nil {
-		return 0, fmt.Errorf("对账 running 任务: %w", err)
+		return 0, err
 	}
-	c, _ := r.RowsAffected()
-	n += int(c)
-	r, err = db.ExecContext(ctx,
-		`UPDATE fs_jobs SET state='canceled', updated_at=?
-		 WHERE state='pending' AND cancel_requested=1`, now)
-	if err != nil {
-		return n, fmt.Errorf("对账已取消的排队任务: %w", err)
-	}
-	c, _ = r.RowsAffected()
-	n += int(c)
+	n += len(ids)
+	s.notifyJobs(ctx, ids)
 	return n, nil
+}
+
+// reconcileExec 跑对账的两条批量改写，返回被改到的所有 id。
+func reconcileExec(ctx context.Context, db sqlExecutor, now int64) ([]int64, error) {
+	var ids []int64
+	for _, q := range []string{
+		`UPDATE fs_jobs SET state='interrupted', updated_at=? WHERE state='running' RETURNING id`,
+		`UPDATE fs_jobs SET state='canceled', updated_at=?
+		 WHERE state='pending' AND cancel_requested=1 RETURNING id`,
+	} {
+		rows, err := db.QueryContext(ctx, q, now)
+		if err != nil {
+			return ids, fmt.Errorf("对账任务: %w", err)
+		}
+		var got []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return ids, fmt.Errorf("对账任务: %w", err)
+			}
+			got = append(got, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return ids, fmt.Errorf("对账任务: %w", err)
+		}
+		rows.Close()
+		ids = append(ids, got...)
+	}
+	return ids, nil
+}
+
+// sqlExecutor 只取对账用到的那一个方法，测试可以塞假实现验证"改到了才推"。
+type sqlExecutor interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // RequestCancelJob 记录取消意图；正在跑的任务另由 worker 的 cancelFunc
@@ -338,6 +374,16 @@ func (s *Service) RequestCancelJob(ctx context.Context, id int64) error {
 	res, err := db.ExecContext(ctx,
 		`UPDATE fs_jobs SET cancel_requested=1, updated_at=?
 		 WHERE id=? AND state IN ('pending','running')`, now, id)
+	// 只在真的改到了才推：改不到说明任务已落终态（用户点了个已完成任务的
+	// 取消按钮），推一条 cancel_requested=true 会让抽屉显示一个永远不会
+	// 发生的取消。
+	defer func() {
+		if err == nil {
+			if c, _ := res.RowsAffected(); c > 0 {
+				s.notifyJob(ctx, id)
+			}
+		}
+	}()
 	if err != nil {
 		return fmt.Errorf("记录取消: %w", err)
 	}
@@ -402,6 +448,9 @@ func (s *Service) claimJob(ctx context.Context) (Job, error) {
 	}
 	j.Dst = dst.String
 	j.Error = eerr.String
+	// 领到即推：pending→running（带取消意图时是 pending→canceled）是队列
+	// 自己发起的状态变化，没有任何调用方会替它广播。
+	s.notifyJob(ctx, j.ID)
 	return j, nil
 }
 
@@ -423,6 +472,7 @@ func (s *Service) setJobProgress(ctx context.Context, id int64, doneBytes int64,
 	if err != nil {
 		return fmt.Errorf("写任务进度: %w", err)
 	}
+	s.notifyJob(ctx, id)
 	return nil
 }
 
@@ -439,6 +489,15 @@ func (s *Service) finishJob(ctx context.Context, id int64, st JobState, reason s
 	if !st.terminal() {
 		return fmt.Errorf("finishJob 只能写终态, got %q", st)
 	}
+	// 用 defer 而不是在每个 return 前加一句：这个函数有三个出口，其中
+	// done→canceled 那条是中途改写。只贴着最后一个 return 加通知，
+	// 改写分支就会静默漏推 —— 界面停在"进行中"，而任务其实早就落了
+	// canceled。终态是抽屉最要紧的一站，漏不得。
+	defer func() {
+		if err == nil {
+			s.notifyJob(ctx, id)
+		}
+	}()
 	now := s.clock().Unix()
 	var res sql.Result
 	if st == JobDone {

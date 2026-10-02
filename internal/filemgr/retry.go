@@ -49,6 +49,7 @@ func (s *Service) RetryJob(ctx context.Context, id int64) (Job, error) {
 		return Job{}, fmt.Errorf("%w: 当前状态 %s（只有被中断的任务能重试）",
 			ErrJobNotCancellable, j.State)
 	}
+	s.notifyJob(ctx, id)
 	s.kick()
 	return s.GetJob(ctx, id)
 }
