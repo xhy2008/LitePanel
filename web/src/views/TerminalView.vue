@@ -12,7 +12,9 @@ import { createTerminalRuntime } from '../composables/useTerminal';
 import { useTermRuntimes, type Runtime } from '../composables/useTermRuntimes';
 import { termChannel, HISTORY_LIMITS, DEFAULT_HISTORY_LIMIT } from '../api/terminal';
 import { useBreakpoint } from '../composables/useBreakpoint';
+import { useRoute, useRouter } from 'vue-router';
 import { tryWs, type WsClient } from '../api/ws';
+import { cwdOfQuery, stripCwd } from '../composables/cwdQuery';
 
 // 终端视图（设计 7.4）。同一时刻只保留**一个** xterm 实例：每个实例都带着
 // 屏幕缓冲、一条 WS 订阅和一个尺寸轮询，留着"看过的全部"就是留着 N 份
@@ -37,6 +39,8 @@ interface TermRuntime extends Runtime {
 const hosts = new Map<number, HTMLElement>();
 const wsStatus = ref<'connecting' | 'online' | 'offline'>('offline');
 const dropped = ref(0);
+const route = useRoute();
+const router = useRouter();
 const fullscreen = ref(false);
 const busy = computed(() => store.loading || store.creating);
 
@@ -194,6 +198,18 @@ async function pick(id: number) {
   await syncActive();
 }
 
+// 读完就把 query 抹掉：留着的话，用户之后刷新页面会再弹一次抽屉,
+// 而那次他并没有"从文件页跳转"的意图。replace 而不是 push：这次改写
+// 不该在历史里占一格，否则"后退"会退回一个仍然带 ?cwd= 的地址,
+// 再进去又弹一次。
+function applyCwdQuery() {
+  const cwd = cwdOfQuery(route.query);
+  if (!cwd) return;
+  form.value = { ...form.value, cwd };
+  formOpen.value = true;
+  void router.replace({ name: 'term', query: stripCwd(route.query) });
+}
+
 async function createSession() {
   try {
     await store.create({
@@ -264,6 +280,12 @@ onMounted(async () => {
   // 之前这里是"切标签/建会话时各查一次"散在三处 —— 那只是"没人轮询"
   // 的补丁，而漏掉的那一处就是角标卡在忙不动。
   busyWatch.start();
+  // 从文件页"在终端中打开"跳过来时带着 ?cwd=：替用户把新建会话的抽屉
+  // 打开并填好目录，而不是让他再手打一遍绝对路径。
+  //
+  // 打开抽屉而不是**直接建会话**：一个目录一个会话地跳转会在一小时内
+  // 攒出几十个同名标签，而用户没要求过这些。
+  applyCwdQuery();
   // 布局变化不一定触发 xterm 的 onResize（侧栏动画、软键盘收起、浏览器
   // 缩放），所以留一个便宜的兜底：只在当前会话上量一次，尺寸没变就什么都不发。
   tick = setInterval(() => runtimes.get(store.activeId)?.checkSize(), 250);
