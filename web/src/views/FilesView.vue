@@ -15,10 +15,9 @@ import type { MenuItem } from '../components/files/ContextMenu.vue';
 import { useFilesStore } from '../stores/files';
 import { useUploadsStore } from '../stores/uploads';
 import { useFsJobsStore } from '../stores/fsJobs';
-import { downloadUrl, zipUrl, joinPath } from '../api/files';
+import { downloadUrl, zipUrl, joinPath, sizeLabel, typeLabel } from '../api/files';
 import type { FsEntry, SortKey } from '../api/files';
 import type { ConflictPolicy } from '../api/upload';
-import { sizeLabel } from '../api/files';
 
 // 文件管理主视图（设计 8.1–8.6 的汇合点）。
 //
@@ -154,7 +153,7 @@ async function onPick(key: string) {
       await copyPaths(targets);
       break;
     case 'props':
-      propsTarget.value = t ? targets : [store.dir];
+      openProps(targets);
       break;
     default:
       break;
@@ -213,6 +212,15 @@ function cutPathsOf(paths: string[]): boolean {
   return !!store.clip && store.clip.mode === 'cut' && store.clip.paths.some((p) => paths.includes(p));
 }
 
+// 属性里的时间要带年份：列表里 mtimeLabel 省年份是为了 500 行里省地方,
+// 而点开属性正是为了看清"到底是哪一次改的"。
+function mtimeFull(epochSec: number): string {
+  if (!epochSec) return '—';
+  const d = new Date(epochSec * 1000);
+  const p = (n: number) => (n < 10 ? `0${n}` : String(n));
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 // ---- 新建 / 重命名 / 删除确认 ----
 
 const mkdirOpen = ref(false);
@@ -222,7 +230,52 @@ const renameTo = ref<{ from: string; to: string } | null>(null);
 const renameErr = ref('');
 const confirmDel = ref(false);
 const permanentDel = ref(false);
-const propsTarget = ref<string[] | null>(null);
+const propsRows = ref<Array<[string, string]> | null>(null);
+// 属性面板列出来的路径（"N 项"标题与错误提示要用）。
+const propsPaths = ref<string[]>([]);
+
+// 属性面板的数据**全部**取自列表已有的字段：列表项本来就是 lstat 的结果,
+// 再问一次后端只会多一次往返、多一个能失败的环节（而且 /fs/stat 对悬空
+// 链接会直接报错，属性对话框反而打不开了）。
+function openProps(paths: string[]) {
+  if (!paths.length) return;
+  propsPaths.value = paths;
+  const rows: Array<[string, string]> = [];
+  const found = paths
+    .map((p) => ({ p, e: store.entries.find((x) => joinPath(store.dir, x.name) === p) }))
+    .filter((x) => x.e);
+  if (found.length === 1 && found[0].e) {
+    const e = found[0].e;
+    rows.push(['名称', e.name]);
+    rows.push(['类型', typeLabel(e)]);
+    // 目录的 size 是 inode 大小（几百字节），当"大小"显示是在骗人：
+    // 用户会以为一个万文件的目录只有几百字节。递归统计要扫全树，
+    // 大目录能卡几十秒，这里不做，干脆不给这一行。
+    if (!e.is_dir) rows.push(['大小', sizeLabel(e.size)]);
+    rows.push(['修改时间', mtimeFull(e.mtime)]);
+    if (e.mode) rows.push(['权限', e.mode]);
+    rows.push(['位置', joinPath(store.dir, e.name)]);
+  } else {
+    // 多选：用户想知道的是"这一堆加起来多大"。目录不计入总数（理由同上）。
+    const files = found.map((x) => x.e!).filter((e) => !e.is_dir);
+    rows.push(['条目数', `${paths.length} 项`]);
+    if (files.length) {
+      const bytes = files.reduce((a, e) => a + e.size, 0);
+      rows.push(['文件总大小', `${sizeLabel(bytes)}（${files.length} 个文件）`]);
+    }
+    if (found.some((x) => x.e!.is_dir)) rows.push(['含目录', '目录大小未统计']);
+  }
+  propsRows.value = rows;
+}
+
+const missingProps = computed(
+  () => propsPaths.value.filter((p) => !store.entries.some((e) => joinPath(store.dir, e.name) === p)),
+);
+
+function closeProps() {
+  propsRows.value = null;
+  propsPaths.value = [];
+}
 
 async function submitMkdir() {
   mkdirErr.value = '';
@@ -431,6 +484,7 @@ onUnmounted(() => {
       <button class="tb" @click="store.selectAll()">{{ store.allSelected ? '取消全选' : '全选' }}</button>
       <button class="tb" @click="store.setClip('cut')">剪切</button>
       <button class="tb" @click="store.setClip('copy')">复制</button>
+      <button class="tb" @click="download(store.selectedPaths)">下载</button>
       <button class="tb d" @click="askDelete">删除</button>
       <button class="tb" @click="store.clearSelection()">取消</button>
     </div>
@@ -478,10 +532,20 @@ onUnmounted(() => {
       </template>
     </Sheet>
 
-    <Sheet v-if="propsTarget" title="属性" icon="properties" @close="propsTarget = null">
-      <div v-for="p in propsTarget" :key="p" class="pp">{{ p }}</div>
+    <Sheet v-if="propsRows" title="属性" icon="properties" @close="closeProps">
+      <dl class="props">
+        <template v-for="[k, v] in propsRows" :key="k">
+          <dt>{{ k }}</dt>
+          <dd>{{ v }}</dd>
+        </template>
+      </dl>
+      <!-- 列表里找不到的项（比如隐藏文件没加载出来）：只列路径，
+           并说清缺的是什么，不要摆一排空字段让人以为文件是空的。 -->
+      <p v-if="missingProps.length" class="pnote">
+        {{ missingProps.length }} 项不在当前列表中，未取到详细信息
+      </p>
       <template #footer>
-        <button class="tb" @click="propsTarget = null">关闭</button>
+        <button class="tb" @click="closeProps">关闭</button>
       </template>
     </Sheet>
 
@@ -638,8 +702,29 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-mute);
 }
+.props {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+.props dt {
+  color: var(--text-dim);
+}
+.props dd {
+  margin: 0;
+  word-break: break-all;
+}
+.pnote {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+
 .selbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 8px 10px;

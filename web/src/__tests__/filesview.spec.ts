@@ -57,6 +57,17 @@ async function mk(listPage: ListPage = page(), opts: { url?: string; roots?: str
   return { w, router };
 }
 
+// 选择栏里的按钮按**文案**找，不按位置索引。
+//
+// 之前用的是 findAll('.selbar .tb')[3] 这种索引：往选择栏加一个按钮
+// （比如"下载"）就会让 11 处索引全体错位 —— 测试会点到隔壁按钮上却
+// 照样通过，那比失败更糟。
+function barBtn(w: Awaited<ReturnType<typeof mk>>['w'], label: string) {
+  const btn = w.findAll('.selbar .tb').find((b) => b.text().includes(label));
+  if (!btn) throw new Error(`选择栏里没有「${label}」按钮`);
+  return btn;
+}
+
 // 真实 WS 推送跨帧到达；settle() 走一个宏任务，确保上一帧先被
 // 组件的 watch 记录（Vue 会把同一 tick 内的多次改动合成一次回调）。
 async function settle() {
@@ -211,10 +222,9 @@ describe('FilesView 操作', () => {
   it('全选 / 取消全选', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    const btns = () => w.findAll('.selbar .tb');
-    await btns()[0].trigger('click');
+    await barBtn(w, '全选').trigger('click');
     expect(useFilesStore().selected).toEqual(['a.txt', 'sub']);
-    await btns()[0].trigger('click');
+    await barBtn(w, '全选').trigger('click');
     expect(useFilesStore().selected).toEqual([]);
   });
 
@@ -222,7 +232,7 @@ describe('FilesView 操作', () => {
   it('删除先确认，再提交任务且默认进回收站', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     expect(w.text()).toContain('移入回收站');
     const ok = w.findAll('.sheet .tb, .shf .tb, .tb.go');
     await ok[ok.length - 1].trigger('click');
@@ -234,7 +244,7 @@ describe('FilesView 操作', () => {
   it('勾了永久删除就带 permanent=true', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     await w.find('.pm input').setValue(true);
     const ok = w.findAll('.tb.go');
     await ok[ok.length - 1].trigger('click');
@@ -248,7 +258,7 @@ describe('FilesView 操作', () => {
   it('剪切只写剪贴板，点粘贴才提交 move 任务且目标是当前目录', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[1].trigger('click');
+    await barBtn(w, '剪切').trigger('click');
     await flushPromises();
     expect(post).not.toHaveBeenCalled();
     expect(useFilesStore().clip).toEqual({ mode: 'cut', paths: ['/data/a.txt'] });
@@ -261,7 +271,7 @@ describe('FilesView 操作', () => {
   it('复制粘贴提交的是 copy，且剪贴板留着（可反复粘到别的目录）', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[2].trigger('click');
+    await barBtn(w, '复制').trigger('click');
     await w.findAll('.tools .tb')[1].trigger('click');
     await flushPromises();
     expect(post.mock.calls.find((c) => c[0] === '/api/fs/jobs')?.[1]).toMatchObject({ op: 'copy' });
@@ -272,7 +282,7 @@ describe('FilesView 操作', () => {
     const { w } = await mk();
     expect(w.findAll('.tools .tb')[1].attributes('disabled')).toBeDefined();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[2].trigger('click'); // 复制
+    await barBtn(w, '复制').trigger('click'); // 复制
     expect(w.findAll('.tools .tb')[1].attributes('disabled')).toBeUndefined();
   });
 
@@ -314,7 +324,7 @@ describe('FilesView 操作', () => {
   it('剪切后源条目压暗', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[1].trigger('click');
+    await barBtn(w, '剪切').trigger('click');
     await flushPromises();
     expect(w.findAllComponents(FileRow)[0].find('.row').classes()).toContain('cut');
   });
@@ -322,7 +332,7 @@ describe('FilesView 操作', () => {
   it('提交任务后给出可见提示（不能点了没反应）', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     const ok = w.findAll('.tb.go');
     await ok[ok.length - 1].trigger('click');
     await flushPromises();
@@ -387,7 +397,7 @@ describe('FilesView 任务完成后的列表刷新', () => {
   it('删除任务完成后列表自动刷新', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     const ok = w.findAll('.tb.go');
     await ok[ok.length - 1].trigger('click');
     await flushPromises();
@@ -402,7 +412,7 @@ describe('FilesView 任务完成后的列表刷新', () => {
   it('用户已经离开那个目录时不刷新', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     const ok = w.findAll('.tb.go');
     await ok[ok.length - 1].trigger('click');
     await flushPromises();
@@ -423,7 +433,7 @@ describe('FilesView 任务完成后的列表刷新', () => {
   it('粘贴任务完成后刷新目标目录', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[2].trigger('click');
+    await barBtn(w, '复制').trigger('click');
     await w.findAll('.tools .tb')[1].trigger('click');
     await flushPromises();
     const fsJobs = await jobs0();
@@ -437,7 +447,7 @@ describe('FilesView 任务完成后的列表刷新', () => {
   it('任务失败时也会刷新（copy 不回滚）', async () => {
     const { w } = await mk();
     await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
-    await w.findAll('.selbar .tb')[3].trigger('click');
+    await barBtn(w, '删除').trigger('click');
     const ok = w.findAll('.tb.go');
     await ok[ok.length - 1].trigger('click');
     await flushPromises();
@@ -456,6 +466,173 @@ describe('FilesView 任务完成后的列表刷新', () => {
     await finish(fsJobs, runningJob(11, 'delete', ['/elsewhere/x']), endJob(11, 'delete', 'done'));
     expect(get).not.toHaveBeenCalled();
   });
+});
+
+describe('FilesView 选择栏的下载按钮', () => {
+  // 用户实测：选中之后底部那排按钮里没有下载，必须长按弹菜单才能下载。
+  // 手机上「长按」是隐藏操作，而下载是最常用的动作之一，该在一键可达处。
+  function spyClicks(): string[] {
+    const got: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      got.push(this.href);
+    });
+    return got;
+  }
+
+  async function select(ks: number[]) {
+    const r = await mk();
+    const rows = r.w.findAllComponents(FileRow);
+    for (const k of ks) await rows[k].find('.chk').trigger('click');
+    return r;
+  }
+
+  it('选择栏里有下载按钮', async () => {
+    const { w } = await select([0]);
+    expect(w.findAll('.selbar .tb').some((b) => b.text().includes('下载'))).toBe(true);
+  });
+
+  // 单个文件走 /fs/download 直链，且带的是**绝对路径**。拼错参数名的表现
+  // 是「点了没反应」而没有任何报错 —— 只能在这里钉住。
+  it('选中单个文件时下载指向 /fs/download 与该项绝对路径', async () => {
+    const clicks = spyClicks();
+    const { w } = await select([0]);
+    await barBtn(w, '下载').trigger('click');
+    await flushPromises();
+    expect(clicks).toHaveLength(1);
+    expect(decodeURIComponent(clicks[0])).toContain('/api/fs/download?path=/data/a.txt');
+  });
+
+  // 选中目录必须改走 zip：后端的 download 对目录必然失败（它是文件流）,
+  // 而 zip 对单文件也合法，所以「含目录」一律打包。
+  it('选中项含目录时改走 /fs/zip', async () => {
+    const clicks = spyClicks();
+    const { w } = await select([1]); // sub 是目录
+    await barBtn(w, '下载').trigger('click');
+    await flushPromises();
+    expect(decodeURIComponent(clicks[0])).toContain('/api/fs/zip?path=/data/sub');
+  });
+
+  it('多选走 zip 且一个 path 都不能少', async () => {
+    const clicks = spyClicks();
+    const { w } = await select([0, 1]);
+    await barBtn(w, '下载').trigger('click');
+    await flushPromises();
+    const q = new URL(clicks[0]).searchParams.getAll('path');
+    expect(q).toEqual(['/data/a.txt', '/data/sub']);
+  });
+
+  // 下载走 <a download>，浏览器自己处理进度与保存位置；这里点了之后
+  // 选择必须还在（用户常常要接着对同一批文件做别的事）。
+  it('点下载不清空选择', async () => {
+    spyClicks();
+    const { w } = await select([0]);
+    await barBtn(w, '下载').trigger('click');
+    await flushPromises();
+    expect(useFilesStore().selected).toEqual(['a.txt']);
+  });
+
+  it('没选中时选择栏整个不显示（也就没有能点的下载按钮）', async () => {
+    const { w } = await mk();
+    expect(w.find('.selbar').exists()).toBe(false);
+  });
+});
+
+describe('FilesView 属性面板', () => {
+  // 用户实测：属性点进去只有一行路径，没什么用。要么给真信息，要么
+  // 别占一个菜单项骗人点进去。
+  async function openProps(w: Awaited<ReturnType<typeof mk>>['w'], onRow: number | null) {
+    const target = onRow === null ? w.find('.list') : w.findAllComponents(FileRow)[onRow].find('.row');
+    const ev: Event & { clientX?: number; clientY?: number } = new Event('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+    });
+    ev.clientX = 24;
+    ev.clientY = 24;
+    target.element.dispatchEvent(ev);
+    await flushPromises();
+    const item = w.findAll('.menu .mi').find((i) => i.text().includes('属性'));
+    if (!item) throw new Error('菜单里没有属性');
+    await item.trigger('click');
+    await flushPromises();
+  }
+
+  // 断言只看属性面板自己的文本：整个 view 的 text() 里包含列表的「大小」
+  // 列，用它断言"不显示大小"永远为假（或永远为真），测不到东西。
+  const propsText = (w: Awaited<ReturnType<typeof mk>>['w']) => w.find('.props').text();
+
+  // 面板只读列表里已有的字段，不发任何请求。
+  it('单个文件的属性给出大小/时间/权限/类型/完整路径', async () => {
+    const { w } = await mk(page({ entries: [entry('a.txt', { size: 4096 }), entry('sub')] }));
+    await openProps(w, 0);
+    const t = propsText(w);
+    expect(t).toContain('4.0 KB'); // 人类可读，不是裸字节
+    expect(t).toContain('-rw-r--r--');
+    expect(t).toContain('/data/a.txt'); // 属性里抄路径是常态
+    expect(t).toContain('文本');
+    expect(t).toContain('2023-'); // 属性里的时间带年份（列表里为了省地方省掉了）
+    expect(t).not.toContain('undefined'); // 缺字段要留空，不能印 undefined
+  });
+
+  // 后端的 mime 是按扩展名查表来的，认不出来就报 application/octet-stream,
+  // 目录则报 inode/directory。把它原样列进属性会有两个问题：绝大多数文件
+  // 都显示同一行 octet-stream（零信息），而用户会以为面板读过文件内容 ——
+  // 它没有。「类型」那一行已经把能确证的说清楚了。
+  it('不显示 mime 行（避免冒充内容嗅探的结果）', async () => {
+    const { w } = await mk(
+      page({ entries: [entry('a.txt', { size: 4096, mime: 'application/octet-stream' }), entry('sub')] }),
+    );
+    await openProps(w, 0);
+    expect(propsText(w)).not.toContain('MIME');
+    expect(propsText(w)).not.toContain('octet-stream');
+  });
+
+  // 目录的 size 是 inode 大小（几百字节），当成「大小」显示是骗人：用户会
+  // 以为一个万文件的目录只有几百字节。所以这一行干脆不给。
+  it('目录不给大小这一行', async () => {
+    const { w } = await mk();
+    await openProps(w, 1);
+    expect(propsText(w)).toContain('目录');
+    expect(propsText(w)).not.toContain('大小');
+  });
+
+  it('多选给出条目数与文件总大小（目录不计入）', async () => {
+    const { w } = await mk(
+      page({ entries: [entry('a.txt', { size: 4096 }), entry('sub', { size: 3 * 1024 * 1024 })] }),
+    );
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAllComponents(FileRow)[1].find('.chk').trigger('click');
+    await openProps(w, null);
+    const t = propsText(w);
+    expect(t).toContain('2 项');
+    // 只有 a.txt 计入。sub 的 inode 大小故意给到 3 MB：要是把目录也加进
+    // 来，总量就变成 3.0 MB —— 差一个量级，这个断言才咬得住。
+    expect(t).toContain('4.0 KB');
+    expect(t).not.toContain('3.0 MB');
+    expect(t).toContain('目录大小未统计');
+  });
+
+  it('多选给出条目数与文件总大小', async () => {
+    const { w } = await mk();
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAllComponents(FileRow)[1].find('.chk').trigger('click');
+    await openProps(w, null);
+    const t = w.text();
+    expect(t).toContain('2');
+    // 目录不计入总大小（理由同上），只有 a.txt 的 10 B。
+    expect(t).toContain('10 B');
+  });
+
+  // 属性面板只读列表里已有的字段，不发任何请求：列表项本来就是 lstat 的
+  // 结果，再问一次后端只会多一次往返 + 一个能失败的环节。
+  it('属性面板不发任何请求', async () => {
+    const { w } = await mk();
+    get.mockClear();
+    await openProps(w, 0);
+    expect(get).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('FilesView 上传', () => {

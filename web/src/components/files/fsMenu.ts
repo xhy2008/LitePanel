@@ -28,9 +28,14 @@ export interface MenuContext {
  *
  * 几个不那么显然的取舍：
  *
- * · 空白处右键（entry 为 null）只给"新建 / 粘贴 / 刷新 / 属性"，不给
+ * · 空白处右键（entry 为 null）只给"新建 / 粘贴 / 刷新（/ 终端）"，不给
  *   删除、重命名、下载 —— 那些需要一个明确的目标，灰着摆在那儿比不摆
  *   更容易被误点（用户以为"粘贴到别处失败了"，实际是删掉了整个目录）。
+ *
+ * · 空白处的"属性"只在**已选中若干项**时出现：没有选中时它唯一的含义是
+ *   "当前目录的属性"，而当前目录能给出的只有一行路径（大小是 inode
+ *   大小、不能递归统计），那一行既没用又不能复制，占个菜单项纯粹骗人点
+ *   进去。有选中时它给出的是这批的合计大小，才是有用的信息。
  *
  * · "粘贴"永远出现，只是无剪贴板时 disabled。整个藏起来会让用户以为
  *   面板不支持粘贴（设计里"粘贴有剪贴板内容时可用"就是这个意思）。
@@ -45,7 +50,10 @@ export function menuItemsFor(c: MenuContext): MenuItem[] {
     items.push({ key: 'mkdir', label: '新建文件夹', icon: 'add' });
     items.push({ key: 'paste', label: '粘贴', icon: 'paste', disabled: !c.hasClip, sep: true });
     items.push({ key: 'refresh', label: '刷新', icon: 'refresh' });
-    items.push({ key: 'props', label: '属性', icon: 'properties' });
+    // 见文件头：没选中时「属性」说不出任何有用信息，索性不摆。
+    if (c.selectedCount > 0) {
+      items.push({ key: 'props', label: '属性', icon: 'properties' });
+    }
     if (c.canOpenTerminal) {
       items.push({ key: 'terminal', label: '在终端中打开', icon: 'terminal_run' });
     }

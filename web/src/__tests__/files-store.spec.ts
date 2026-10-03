@@ -55,6 +55,55 @@ beforeEach(() => {
   resetApi();
 });
 
+// 后端响应形状漂移（或返回了一个非 200 的 JSON）时，dir 会变成
+// undefined，而面包屑拿 undefined 去 lastIndexOf 会**整个视图渲染崩掉**
+// —— 白屏、没有错误条、控制台里一行栈，用户什么都不知道。
+describe('store.dir 绝不允许是 undefined', () => {
+  function withList(payload: unknown) {
+    const get = vi.fn(async () => payload);
+    resetApi();
+    setApi({ get, post: vi.fn(), del: vi.fn() } as never,
+      { pathname: '/', search: '', assign: () => {} }, vi.fn() as never);
+    return get;
+  }
+
+  it('响应缺 path 时退回请求的 path（符号链接解析仍以回显为准）', async () => {
+    withList({ entries: [], page: 1, total: 0, size: 500 });
+    const s = useFilesStore();
+    await s.open('/data/x');
+    expect(s.dir).toBe('/data/x');
+    expect(s.error).toBe(''); // 这不是错误，只是回显缺字段
+  });
+
+  // 回显存在时必须优先用它：请求 /data/link 而后端解析到 /real，
+  // 后续删除必须打在 /real 上。
+  it('回显 path 存在时仍以回显为准', async () => {
+    withList({ path: '/real', entries: [], page: 1, total: 0, size: 500 });
+    const s = useFilesStore();
+    await s.open('/data/link');
+    expect(s.dir).toBe('/real');
+  });
+
+  it('响应完全不是对象时退回而不崩', async () => {
+    withList(null);
+    const s = useFilesStore();
+    await s.open('/data/x');
+    expect(s.dir).toBe('/data/x');
+    expect(s.entries).toEqual([]);
+  });
+
+  // entries 是**非数组**（字符串 / 对象）时 ?? 兜不住：那会让 FileRow 的
+  // v-for 去遍历字符串的每个字符，页面渲染出几百个单字符的假文件行。
+  it('entries 不是数组时一律当空列表', async () => {
+    for (const bad of ['oops', { 0: 'a' }, 42]) {
+      withList({ path: '/data/x', entries: bad, page: 1, total: 0, size: 500 });
+      const s = useFilesStore();
+      await s.open('/data/x');
+      expect(s.entries).toEqual([]);
+    }
+  });
+});
+
 describe('files store：目录加载', () => {
   it('open 用响应回显的 path，而不是发出去的参数', async () => {
     // 符号链接会让两者指向不同目录，而 selectedPaths 用的是 dir：

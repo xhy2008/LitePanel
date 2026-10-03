@@ -106,7 +106,7 @@ async function openDrawer(items: JobRow[] = []) {
 describe('JobDrawer', () => {
   // 挂载就拉一次，与开没开无关：角标要显示"几个进行中"，那需要数据。
   it('挂载即拉列表；打开后渲染任务', async () => {
-    const { w, api } = await openDrawer([row({ entries_done: 3 }), row({ id: 2, op: 'copy', state: 'done' })]);
+    const { w, api } = await openDrawer([row({ entries_done: 3 }), row({ id: 2, op: 'copy', state: 'running' })]);
     expect(api.get).toHaveBeenCalledWith('/api/fs/jobs');
     expect(w.text()).toContain('删除');
     expect(w.text()).toContain('复制');
@@ -122,6 +122,56 @@ describe('JobDrawer', () => {
     const { w } = await openDrawer([row({ state: 'running', cancel_requested: true })]);
     // 必须是"正在取消"这句话本身，而不是随便一个含"取消"的字样。
     expect(w.text()).toContain('正在取消');
+  });
+
+  // 已完成的项不再显示（用户的裁定：任务列表不记录已完成的任务）。
+  //
+  // 注意这是**显示层**的过滤，不是从 store 里删掉：
+  //  · 文件页靠"watch items 里 active → 终态"这个边沿来刷新列表,
+  //    真删掉会让那一帧根本进不到 store,刷新静默失效。
+  //  · 后端那份记录才是"关浏览器也不中断"的凭据,前端无权抹。
+  it('已完成的任务不出现在抽屉里', async () => {
+    const { w } = await openDrawer([
+      row({ id: 1, state: 'done' }),
+      row({ id: 2, op: 'copy', state: 'running' }),
+    ]);
+    expect(w.text()).toContain('复制'); // 进行中的在
+    expect(w.text()).not.toContain('已完成'); // done 那条不显示
+    expect(w.findAll('.job-row')).toHaveLength(1);
+  });
+
+  // 全部完成 = 抽屉回到空状态文案,而不是留一排"已完成"。
+  it('任务全部完成后抽屉显示空状态', async () => {
+    const { w } = await openDrawer([row({ state: 'done' })]);
+    expect(w.findAll('.job-row')).toHaveLength(0);
+    expect(w.text()).toContain('还没有任务');
+  });
+
+  // 失败/中断必须留着：那两类带着错误原文和重试按钮,是用户唯一能
+  // 据此决定"再跑一遍还是先腾磁盘"的地方。
+  it('失败与中断的任务仍然显示', async () => {
+    const { w } = await openDrawer([
+      row({ id: 1, state: 'failed', error: 'no space left on device' }),
+      row({ id: 2, op: 'copy', state: 'interrupted' }),
+    ]);
+    expect(w.findAll('.job-row')).toHaveLength(2);
+    expect(w.text()).toContain('no space left on device');
+  });
+
+  // 推送把任务推到 done 之后,它应当立刻从抽屉消失（不用手动清）。
+  it('任务跑到 done 后自动从抽屉消失', async () => {
+    const { w } = await openDrawer([row({ entries_done: 3, entries_total: 10 })]);
+    expect(w.findAll('.job-row')).toHaveLength(1);
+    const store = useFsJobsStore();
+    store.applyProgress({
+      id: 1, op: 'delete', dst: '', total_bytes: 0, done_bytes: 0,
+      entries_total: 10, entries_done: 10, state: 'done', cancel_requested: false,
+      permanent: false, resumed: false, updated_at: 1,
+    } as never);
+    await flushPromises();
+    expect(w.findAll('.job-row')).toHaveLength(0);
+    // 但 store 里那一行还在 —— 文件页的列表刷新要读它。
+    expect(store.items.some((j) => j.state === 'done')).toBe(true);
   });
 
   // 只有 pending/running 有取消按钮：给一条已完成的任务挂"取消"，

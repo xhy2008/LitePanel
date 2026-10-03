@@ -84,7 +84,7 @@ export function joinPath(dir: string, name: string): string {
 /** 面包屑分段："/data/x" → [{label:'/'}…{label:'data',path:'/data'}…]。 */
 export function crumbOf(abs: string): Array<{ label: string; path: string }> {
   const out: Array<{ label: string; path: string }> = [{ label: '/', path: '/' }];
-  if (abs === '/' || abs === '') return out;
+  if (typeof abs !== 'string' || abs === '' || abs === '/') return out;
   let acc = '';
   for (const seg of abs.split('/').filter(Boolean)) {
     acc += '/' + seg;
@@ -93,9 +93,13 @@ export function crumbOf(abs: string): Array<{ label: string; path: string }> {
   return out;
 }
 
-/** 父目录。根与 '/' 的父是自身（面包屑在根上不再显示"上一级"）。 */
+/** 父目录。根与 '/' 的父是自身（面包屑在根上不再显示"上一级"）。
+ *
+ * 非字符串输入（undefined / null）一律当根：这两个函数被面包屑的
+ * computed 直接调，在这里抛 = 整个视图白屏。store 已经不会灌脏值,
+ * 但"最多显示不好、绝不抛"才是能放心的契约。 */
 export function parentOf(abs: string): string {
-  if (abs === '/' || abs === '') return '/';
+  if (typeof abs !== 'string' || abs === '' || abs === '/') return '/';
   const i = abs.lastIndexOf('/');
   if (i <= 0) return '/';
   return abs.slice(0, i);
@@ -145,6 +149,55 @@ export function zipUrl(paths: string[]): string {
   for (const p of paths) q.append('path', p);
   return `/api/fs/zip?${q.toString()}`;
 }
+
+/**
+ * 属性面板的「类型」文案。
+ *
+ * 只报能确证的部分：目录/符号链接看 lstat 的事实，其余先看后端给的 mime,
+ * mime 不可用（Linux 上很多文件 lstat 不带 mime）再退到扩展名。认不出来
+ * 就说「文件」—— 属性对话框里的一个错分类比缺一项更糟，用户会拿它决定
+ * 要不要打开 / 删掉。
+ */
+export function typeLabel(e: FsEntry): string {
+  if (e.is_symlink) return '符号链接';
+  if (e.is_dir) return '目录';
+  const mime = (e.mime || '').toLowerCase();
+  const hit = TYPE_WORDS.find(([re]) => re.test(mime));
+  if (hit) return hit[1];
+  // 扩展名兜底：和 iconFor 用同一份分类口径，两处说不一样会是 bug 现场。
+  // .tar.gz 这类双扩展名：取最后一段就只会看到 gz，已在 ARCHIVES 里；
+  // 而 .tar 本身也在，不必再解析整串名字。
+  const ext = e.name.includes('.') ? e.name.split('.').pop()!.toLowerCase() : '';
+  if (ARCHIVES.includes(ext)) return '压缩包';
+  return TYPE_BY_EXT[ext] ?? '文件';
+}
+
+const TYPE_WORDS: Array<[RegExp, string]> = [
+  [/^image\//, '图片'],
+  [/^video\//, '视频'],
+  [/^audio\//, '音频'],
+  [/^text\//, '文本'],
+  [/pdf/, 'PDF'],
+  [/(zip|gzip|x-tar|7z|rar|xz|bzip2)/, '压缩包'],
+  [/json/, 'JSON'],
+  [/(yaml|x-yaml|toml|x-toml)/, '配置'],
+  [/(shellscript|x-sh)/, '脚本'],
+  // octet-stream 不在这里：它是后端"认不出来"的默认值，不是可执行。
+  [/^application\/(x-msdownload|x-executable|executable)$/, '程序'],
+];
+
+const ARCHIVES = ['zip', 'gz', 'tar', 'tgz', 'xz', 'bz2', '7z', 'rar'];
+
+const TYPE_BY_EXT: Record<string, string> = {
+  md: '文本', txt: '文本', log: '文本', csv: '表格', tsv: '表格',
+  conf: '配置', ini: '配置', yaml: '配置', yml: '配置', toml: '配置',
+  // 只有名字本身就是「可执行」的扩展名才敢这么说。.bin 不算：它可能是
+  // 固件、core dump、任意数据文件，说成「程序」是替用户做他没做的判断。
+  exe: '程序', msi: '程序', deb: '程序', rpm: '程序', apk: '程序',
+  json: 'JSON', js: '脚本', ts: '脚本', py: '脚本', go: '程序', sh: '脚本', bash: '脚本',
+  png: '图片', jpg: '图片', jpeg: '图片', gif: '图片', webp: '图片', svg: '图片', bmp: '图片',
+  mp4: '视频', mkv: '视频', avi: '视频', mp3: '音频', flac: '音频', wav: '音频',
+};
 
 /** 按 mime / 扩展名挑图标（AppIcon 的名字）。 */
 export function iconFor(e: FsEntry): string {

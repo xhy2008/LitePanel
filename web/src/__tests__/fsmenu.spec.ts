@@ -75,10 +75,17 @@ describe('menuItemsFor', () => {
   });
 
   // 空白处右键没有明确目标：删除/重命名/下载都必须缺席，否则一次误点
-  // 就是把整个目录送进回收站。
-  it('空白处只给新建/粘贴/刷新/属性/终端', () => {
+  // 就是把整个目录送进回收站。属性也不给 —— 它过去显示的是**当前目录
+  // 自己的路径**，那一行既不能复制也不能说明任何事，占个菜单项纯粹骗人
+  // 点进去；路径在地址栏和面包屑里都有，"复制路径"也在同一菜单里。
+  it('空白处且没选中时只给新建/粘贴/刷新/终端', () => {
     const it = menuItemsFor(ctx({ entry: null, selectedCount: 0 }));
-    expect(keys(it)).toEqual(['mkdir', 'paste', 'refresh', 'props', 'terminal']);
+    expect(keys(it)).toEqual(['mkdir', 'paste', 'refresh', 'terminal']);
+  });
+
+  // 空白处但已选中若干项时，属性变成有用的东西：给出这批的合计大小。
+  it('空白处但选中了项时给属性', () => {
+    expect(keys(menuItemsFor(ctx({ entry: null, selectedCount: 2 })))).toContain('props');
   });
 
   it('关掉终端能力时不出现"在终端中打开"', () => {

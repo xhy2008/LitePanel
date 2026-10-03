@@ -113,8 +113,11 @@ export const useFilesStore = defineStore('files', {
         // 以**响应回显的 path** 为准，而不是发出去的参数：符号链接会让
         // 两者指向不同目录，而自己拼的 selectedPaths 用的是 dir，
         // 不一致时删除会打到隔壁目录的同名文件上。
-        this.dir = p.path;
-        this.entries = p.entries ?? [];
+        // 回显缺字段（形状漂移 / 拿到了一个错误 JSON）时必须退回请求的
+        // 路径：dir 是 undefined 会让面包屑崩掉，而崩在渲染函数里 = 整个
+        // 视图白屏且没有错误条，比显示一个旧目录严重得多。
+        this.dir = typeof p?.path === 'string' && p.path ? p.path : path;
+        this.entries = Array.isArray(p?.entries) ? p.entries : [];
         this.page = p.page;
         this.total = p.total;
         // 换目录必须清空选择：留着上一个目录的选中项，用户在 B 目录
