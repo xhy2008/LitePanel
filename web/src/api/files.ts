@@ -125,6 +125,27 @@ export function mtimeLabel(epochSec: number, now = Date.now()): string {
   return d.getFullYear() === new Date(now).getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md}`;
 }
 
+/**
+ * 单文件下载地址（设计 8.3）。
+ *
+ * 路径用 searchParams 编码而不是手拼：文件名里的 & # = 与空格是真实存在
+ * 的（"报告 v2 & 终版.pdf" 这种），手拼会把一个合法路径切成两个参数。
+ */
+export function downloadUrl(path: string): string {
+  return `/api/fs/download?path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * 多选打包下载地址。后端读的是重复的 path= 参数（r.URL.Query()["path"]）,
+ * 一个都不能少：少一个就是"静默少打包了一个文件"，而下载下来的 zip
+ * 里看不出少了东西。
+ */
+export function zipUrl(paths: string[]): string {
+  const q = new URLSearchParams();
+  for (const p of paths) q.append('path', p);
+  return `/api/fs/zip?${q.toString()}`;
+}
+
 /** 按 mime / 扩展名挑图标（AppIcon 的名字）。 */
 export function iconFor(e: FsEntry): string {
   if (e.is_dir) return 'folder';
