@@ -569,16 +569,19 @@ func TestReconcileJobsCancelsQueuedCanceled(t *testing.T) {
 	}
 }
 
-// 普通排队任务重启后**保持 pending**（会继续跑），已完成/失败的也不动。
+// 普通排队任务重启后**保持 pending**（会继续跑）。
+//
+// 原先这条测试还断言"已完成的也不动" —— done 现在恰恰是唯二要动的
+// （启动时删行，见 TestReconcileJobsDropsDoneRows），断言跟着改。
 func TestReconcileJobsLeavesOthersAlone(t *testing.T) {
 	e := newJobEnv(t)
 	waiting, _ := e.svc.CreateJob(context.Background(), JobInput{
 		Op: OpDelete, Src: []string{e.mk(t, "排队.txt", "x")},
 	})
-	fin, _ := e.svc.CreateJob(context.Background(), JobInput{
-		Op: OpDelete, Src: []string{e.mk(t, "完了.txt", "x")},
+	bad, _ := e.svc.CreateJob(context.Background(), JobInput{
+		Op: OpDelete, Src: []string{e.mk(t, "失败了.txt", "x")},
 	})
-	if err := e.svc.finishJob(context.Background(), fin.ID, JobDone, ""); err != nil {
+	if err := e.svc.finishJob(context.Background(), bad.ID, JobFailed, "磁盘满"); err != nil {
 		t.Fatal(err)
 	}
 	e2 := NewService(Options{DB: e.db, Clock: e.clk.Now})
@@ -587,13 +590,13 @@ func TestReconcileJobsLeavesOthersAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Errorf("没有 running 时不该改任何东西, got %d", n)
+		t.Errorf("没有 running/pending取消/done 时不该改任何东西, got %d", n)
 	}
 	if w, _ := e2.GetJob(context.Background(), waiting.ID); w.State != JobPending {
 		t.Errorf("排队任务应保持 pending, got %s", w.State)
 	}
-	if f, _ := e2.GetJob(context.Background(), fin.ID); f.State != JobDone {
-		t.Errorf("已完成不该被动, got %s", f.State)
+	if b, _ := e2.GetJob(context.Background(), bad.ID); b.State != JobFailed {
+		t.Errorf("失败任务不该被动, got %s", b.State)
 	}
 }
 
@@ -843,5 +846,86 @@ func TestJobsResumedColumnDefaultsZero(t *testing.T) {
 	}
 	if r != 0 {
 		t.Errorf("resumed 默认该是 0（全新提交不是重试）, got %d", r)
+	}
+}
+
+// 已完成（done）的任务**不跨重启保留**。
+//
+// 用户对 M6-T8 的记录方式提的修正：重启之后任务列表里还躺着一排
+// "已完成"，而它对任何东西都没有下一步 —— interrupted 能重试、failed 带
+// 错误原文、canceled 是用户自己按的，只有 done 是纯粹的账目。用户对"任务
+// 跑完了吗"的判据本来就是目标目录里文件到没到，不是抽屉里那行灰字。
+//
+// 注意这**不**是"任务一完成就从记忆里抹掉"：同一次运行内 done 行照常
+// 留在库里（见 TestJobDoneStaysListableWithinSession），抽屉里的"已完成"
+// 与文件列表刷新都靠它。只有**下一个进程启动时**才清 —— 那时它确定
+// 不可能再改变任何东西。
+func TestReconcileJobsDropsDoneRows(t *testing.T) {
+	e := newJobEnv(t)
+	done, _ := e.svc.CreateJob(context.Background(), JobInput{
+		Op: OpDelete, Src: []string{e.mk(t, "删掉.txt", "x")},
+	})
+	if err := e.svc.finishJob(context.Background(), done.ID, JobDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	e2 := NewService(Options{DB: e.db, Clock: e.clk.Now})
+	if _, err := e2.ReconcileJobs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.GetJob(context.Background(), done.ID); !errors.Is(err, ErrNoJob) {
+		t.Errorf("重启后 done 行应被清掉, got err=%v", err)
+	}
+}
+
+// 其他终态必须原样保留。清"已完成"时把相邻状态一起 DELETE 是最容易犯的
+// 错：interrupted 带着重试按钮（唯一能让用户续跑半截任务的入口），
+// failed 带着磁盘满/权限拒绝这类只有当时才知道的原文。
+func TestReconcileJobsKeepsOtherTerminalStates(t *testing.T) {
+	e := newJobEnv(t)
+	for _, tc := range []struct {
+		name string
+		st   JobState
+	}{
+		{"failed 留着错误原文", JobFailed},
+		{"canceled 是用户按的", JobCanceled},
+		{"interrupted 能重试", JobInterrupted},
+	} {
+		j, _ := e.svc.CreateJob(context.Background(), JobInput{
+			Op: OpDelete, Src: []string{e.mk(t, tc.name+"x.txt", "x")},
+		})
+		if err := e.svc.finishJob(context.Background(), j.ID, tc.st, "磁盘满"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e2 := NewService(Options{DB: e.db, Clock: e.clk.Now})
+	if _, err := e2.ReconcileJobs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e2.ListJobs(context.Background(), JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("三个非 done 终态都该还在, got %d 条", len(got))
+	}
+}
+
+// 同一次运行内，done 行必须留在库里可读。
+//
+// M6-T8 的验收场景（30% 时关浏览器，5 分钟后回来看结果）依赖这一点：
+// 面板没重启，抽屉要能显示"已完成"；文件页的列表刷新也靠读到这一行。
+// 清理只发生在启动对账，不在 finishJob 里 —— 在 finalize 里顺手 DELETE
+// 会把抽屉的完成通知一起删掉（notifyJob 靠重读那一行拼推送）。
+func TestJobDoneStaysListableWithinSession(t *testing.T) {
+	e := newJobEnv(t)
+	j, _ := e.svc.CreateJob(context.Background(), JobInput{
+		Op: OpDelete, Src: []string{e.mk(t, "x.txt", "x")},
+	})
+	if err := e.svc.finishJob(context.Background(), j.ID, JobDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.svc.GetJob(context.Background(), j.ID)
+	if got.State != JobDone {
+		t.Errorf("同一进程内 done 必须还在, got %s", got.State)
 	}
 }

@@ -52,23 +52,13 @@ onUnmounted(() => {
 
 const badge = computed(() => store.activeCount);
 
-// 抽屉只列"还没尘埃落定"的任务：进行中 + 失败/中断/已取消。
-//
-// 唯独 done 不列（用户的裁定：任务列表不记录已完成的任务,跑完就清)。
-// 这是**显示层**过滤,不是从 store 删行：
-//  · 文件页靠"watch store.items 里 active→终态"这个边沿刷新列表,真删掉
-//    会让那一帧进不到 store,上一轮修的"删完列表不动"会以另一种方式复发。
-//  · 后端那份记录才是"关浏览器也不中断"的凭据(设计 8.4/验收 M6-T8),
-//    前端删了它也没了,只是界面上不再显示而已。
-//  · failed / interrupted 必须留着:那两类带错误原文和重试按钮,是用户
-//    唯一能据此判断"重跑还是先腾磁盘"的地方,不属于"已完成"。
+// 进行中排前面：抽屉的核心用途是"现在在跑什么"，翻到底下找进行中
+// 等于没有。同组内按 id 倒序（新提交在前）。
 const sorted = computed(() =>
-  store.items
-    .filter((j) => j.state !== 'done')
-    .sort((a, b) => {
-      const d = Number(isActive(b.state)) - Number(isActive(a.state));
-      return d !== 0 ? d : b.id - a.id;
-    }),
+  [...store.items].sort((a, b) => {
+    const d = Number(isActive(b.state)) - Number(isActive(a.state));
+    return d !== 0 ? d : b.id - a.id;
+  }),
 );
 
 function pct(j: JobRow) {

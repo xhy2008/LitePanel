@@ -84,7 +84,10 @@ func (s *Service) StartJobs(ctx context.Context) bool {
 	if n, err := s.ReconcileJobs(ctx); err != nil {
 		logx.Error("任务对账失败: %v", err)
 	} else if n > 0 {
-		logx.Info("任务对账：%d 条上次遗留的任务已标记", n)
+		// 措辞要盖住两类改动：把遗留任务标成 interrupted/canceled，以及
+		// 清掉上次的 done 行。只写"已标记"会让运维对着"清了 40 条"的日志
+		// 以为一堆任务出了问题，而实际只是删历史。
+		logx.Info("任务对账：%d 条上次遗留的任务已标记或清除", n)
 	}
 	for i := 0; i < s.jobConcurrency; i++ {
 		s.jobsWG.Add(1)

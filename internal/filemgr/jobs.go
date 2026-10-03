@@ -296,7 +296,17 @@ func (s *Service) ListJobs(ctx context.Context, f JobFilter) ([]Job, error) {
 // pending 且带取消意图 → canceled：这是"取消意图必须落盘"的另一半，光存
 // 不用等于没存 —— 否则重启后这个用户已经说"别做"的 delete 会被真做掉。
 //
-// 普通 pending 保持不动（会继续跑），终态一律不碰。
+// done 直接删行（用户裁定：已完成的任务不值得持久化）。终态里只有它对
+// 重启后的世界没有任何下一步 —— interrupted 能重试、failed 带错误原文、
+// canceled 是用户自己按的，done 只剩账目；而用户判断"跑完了吗"的手段本来
+// 就是看目标目录，不是看抽屉里那行灰字。
+//
+// 清理只发生在**启动对账**，不在 finishJob 里：同一次运行内 done 行照常
+// 留着（抽屉的"已完成"行、文件列表刷新、以及"30% 关浏览器 5 分钟回来看
+// 结果"这条验收都靠它）。在 finalize 里顺手 DELETE 会连抽屉的完成通知一起
+// 删掉 —— notifyJob 靠重读那一行拼推送，删了就推不出去。
+//
+// 普通 pending 保持不动（会继续跑）。其余终态一律不碰。
 func (s *Service) ReconcileJobs(ctx context.Context) (int, error) {
 	db, err := s.jobDB()
 	if err != nil {
@@ -318,7 +328,32 @@ func (s *Service) ReconcileJobs(ctx context.Context) (int, error) {
 	}
 	n += len(ids)
 	s.notifyJobs(ctx, ids)
-	return n, nil
+	// 删掉的 done 不进 ids：行都没了，notifyJob 的重读注定失败，塞进去
+	// 只会白跑一轮 —— 前端的抽屉本来也没订过这些历史行。
+	deleted, err := reconcileDropDone(ctx, db)
+	if err != nil {
+		return n, err
+	}
+	return n + deleted, nil
+}
+
+// doneDeleter 只取清历史用到的那一个方法（与 sqlExecutor 同一理由：
+// 让"对账到底动了库的哪两处"在读代码时就能数清）。
+type doneDeleter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// reconcileDropDone 清掉上一次运行留下的已完成任务，返回删掉的条数。
+func reconcileDropDone(ctx context.Context, db doneDeleter) (int, error) {
+	res, err := db.ExecContext(ctx, `DELETE FROM fs_jobs WHERE state='done'`)
+	if err != nil {
+		return 0, fmt.Errorf("清已完成任务: %w", err)
+	}
+	c, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("清已完成任务: 统计改动行数: %w", err)
+	}
+	return int(c), nil
 }
 
 // reconcileExec 跑对账的两条批量改写，返回被改到的所有 id。
