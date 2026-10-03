@@ -79,8 +79,12 @@ function submit() {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 8rem;
+  /* 地板宽度不能是 0。地址栏是唯一的「手动输入路径」入口：工具栏按钮一多
+     （新建/粘贴/上传/回收站，再加排序那一组）就会把它挤到看不见，而初始
+     目录不可读时连面包屑都没有 —— 结果是根本没地方开始。宁可让按钮那侧
+     换行，也不能让导航入口消失。 */
+  min-width: 8rem;
   padding: 6px 8px;
   border: 1px solid transparent;
   border-radius: 6px;

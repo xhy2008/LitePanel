@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { mount } from '@vue/test-utils';
 import PathInput from '../components/files/PathInput.vue';
@@ -119,5 +120,20 @@ describe('Breadcrumb', () => {
   it('最后一段是普通文本（不可再次跳转的暗示）', () => {
     const segs = mount(Breadcrumb, { props: { path: '/data/x' } }).findAll('.seg');
     expect(segs[segs.length - 1].classes()).toContain('last');
+  });
+});
+
+// 用户实测踩到的：初始目录不可读（没有面包屑可点）时，地址栏是唯一的
+// 导航入口 —— 它被工具栏挤到零宽等于"根本没地方开始"。happy-dom 不加载
+// scoped 样式，只能对着源文件的 style 块把这条地板钉住（同 tokens.spec.ts
+// 的思路：这类"静默失效"只有静态扫才能拦住）。
+describe('PathInput 不被挤没', () => {
+  const src = readFileSync('src/components/files/PathInput.vue', 'utf-8');
+  const block = src.slice(src.indexOf('.pi {'));
+
+  it('根容器声明了非零的 min-width 地板', () => {
+    const m = block.match(/min-width:\s*([^;]+);/);
+    expect(m, '.pi 必须显式声明 min-width').toBeTruthy();
+    expect(m![1].trim()).not.toBe('0');
   });
 });

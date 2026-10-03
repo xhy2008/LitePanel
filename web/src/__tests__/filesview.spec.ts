@@ -6,6 +6,8 @@ import FilesView from '../views/FilesView.vue';
 import FileRow from '../components/files/FileRow.vue';
 import { setApi, resetApi } from '../api/inject';
 import { useFilesStore } from '../stores/files';
+import { useFsJobsStore } from '../stores/fsJobs';
+import type { JobOp, JobState, JobRow, JobProgress } from '../api/fsJobs';
 import type { FsEntry, ListPage } from '../api/files';
 
 // 文件页是这一轮里唯一把 store、菜单、上传、任务四套东西接到一起的地方。
@@ -53,6 +55,12 @@ async function mk(listPage: ListPage = page(), opts: { url?: string; roots?: str
   const w = mount(FilesView, { global: { plugins: [router, pinia], stubs: { AppIcon: true } } });
   await flushPromises();
   return { w, router };
+}
+
+// 真实 WS 推送跨帧到达；settle() 走一个宏任务，确保上一帧先被
+// 组件的 watch 记录（Vue 会把同一 tick 内的多次改动合成一次回调）。
+async function settle() {
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 beforeEach(() => {
@@ -340,6 +348,113 @@ describe('FilesView 操作', () => {
     await item!.trigger('click');
     await flushPromises();
     expect(router.currentRoute.value.query.cwd).toBe('/data/sub');
+  });
+});
+
+describe('FilesView 任务完成后的列表刷新', () => {
+  // 删除/粘贴走的是后台队列：界面提交完任务之后如果就此"失聪",
+  // 用户删完看到的还是原来那一列表（文件明明已从盘上没了），第一反应是
+  // 没删掉、会再删一次。队列的正确闭环 = 任务到终态时把列表刷回来。
+  async function jobs0() {
+    return (await import('../stores/fsJobs')).useFsJobsStore();
+  }
+  // 推进一条 running 任务再让下一帧变终态。running 与终态之间必须 settle():
+  // watch 靠"上一帧是活跃"记边沿，两帧塞进同一个 tick 会被 Vue 合成一次
+  // 回调、只看到终态，边沿判断不成立。真实 WS 推送本来就是分帧到达的",-
+  // -settle 是在如实建模，不是给实现打补丁。
+  async function finish(fsJobs: ReturnType<typeof useFsJobsStore>, running: JobRow, end: JobProgress) {
+    fsJobs.items.push(running);
+    await settle();
+    fsJobs.applyProgress(end);
+    await flushPromises();
+  }
+
+  function runningJob(id: number, op: JobOp, src: string[], dst = ''): JobRow {
+    return {
+      id, op, src, dst, total_bytes: 0, done_bytes: 0, entries_total: 1, entries_done: 0,
+      state: 'running', cancel_requested: false, permanent: false, resumed: false,
+      created_at: 0, updated_at: 0,
+    };
+  }
+  function endJob(id: number, op: JobOp, state: JobState, dst = '', error = ''): JobProgress {
+    return {
+      id, op, dst, total_bytes: 0, done_bytes: 0, entries_total: 1,
+      entries_done: state === 'done' ? 1 : 0, state, cancel_requested: false,
+      permanent: false, resumed: false, error, updated_at: 1,
+    };
+  }
+
+  it('删除任务完成后列表自动刷新', async () => {
+    const { w } = await mk();
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAll('.selbar .tb')[3].trigger('click');
+    const ok = w.findAll('.tb.go');
+    await ok[ok.length - 1].trigger('click');
+    await flushPromises();
+    const fsJobs = await jobs0();
+    get.mockClear();
+    await finish(fsJobs, runningJob(7, 'delete', ['/data/a.txt']), endJob(7, 'delete', 'done'));
+    expect(get.mock.calls.some((c) => String(c[0]).startsWith('/api/fs/list'))).toBe(true);
+  });
+
+  // 与 stores/uploads 的 refresh 同一条规则：只在用户**正看着**那个目录时
+  // 刷新。无脑刷新会把他正在翻的目录弹回第一页。
+  it('用户已经离开那个目录时不刷新', async () => {
+    const { w } = await mk();
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAll('.selbar .tb')[3].trigger('click');
+    const ok = w.findAll('.tb.go');
+    await ok[ok.length - 1].trigger('click');
+    await flushPromises();
+    const fsJobs = await jobs0();
+    fsJobs.items.push(runningJob(8, 'delete', ['/data/a.txt']));
+    await settle();
+    // 显式跳到别的目录：只关心"当前正看着哪个目录",与面包屑怎么渲染无关。
+    get.mockResolvedValue({ path: '/elsewhere', page: 1, size: 500, total: 0, entries: [] } as never);
+    await useFilesStore().open('/elsewhere');
+    await flushPromises();
+    get.mockClear();
+    fsJobs.applyProgress(endJob(8, 'delete', 'done') as never);
+    await flushPromises();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  // 粘贴（copy）的目标目录同样：完成之后新东西要出现在列表里。
+  it('粘贴任务完成后刷新目标目录', async () => {
+    const { w } = await mk();
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAll('.selbar .tb')[2].trigger('click');
+    await w.findAll('.tools .tb')[1].trigger('click');
+    await flushPromises();
+    const fsJobs = await jobs0();
+    get.mockClear();
+    await finish(fsJobs, runningJob(9, 'copy', ['/data/a.txt'], '/data'), endJob(9, 'copy', 'done', '/data'));
+    expect(get.mock.calls.some((c) => String(c[0]).startsWith('/api/fs/list'))).toBe(true);
+  });
+
+  // 失败也刷新：copy 在后端不回滚（见 exec_run.go），失败可能已经把一部分
+  // 文件放进目标目录。delete/move 失败时磁盘没变,多刷一次无害。宁多勿漏。
+  it('任务失败时也会刷新（copy 不回滚）', async () => {
+    const { w } = await mk();
+    await w.findAllComponents(FileRow)[0].find('.chk').trigger('click');
+    await w.findAll('.selbar .tb')[3].trigger('click');
+    const ok = w.findAll('.tb.go');
+    await ok[ok.length - 1].trigger('click');
+    await flushPromises();
+    const fsJobs = await jobs0();
+    get.mockClear();
+    await finish(fsJobs, runningJob(10, 'delete', ['/data/a.txt']),
+      endJob(10, 'delete', 'failed', '', 'no space left on device'));
+    expect(get.mock.calls.some((c) => String(c[0]).startsWith('/api/fs/list'))).toBe(true);
+  });
+
+  // 与本目录无关的任务完成时不刷新（比如另一个标签页提交的任务）。
+  it('与本目录无关的任务完成时不刷新', async () => {
+    const { w } = await mk();
+    const fsJobs = await jobs0();
+    get.mockClear();
+    await finish(fsJobs, runningJob(11, 'delete', ['/elsewhere/x']), endJob(11, 'delete', 'done'));
+    expect(get).not.toHaveBeenCalled();
   });
 });
 

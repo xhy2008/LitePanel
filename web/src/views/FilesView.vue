@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppIcon from '../components/AppIcon.vue';
 import Sheet from '../components/services/Sheet.vue';
@@ -10,6 +10,7 @@ import ContextMenu from '../components/files/ContextMenu.vue';
 import UploadDropZone from '../components/files/UploadDropZone.vue';
 import TrashPanel from '../components/files/TrashPanel.vue';
 import { menuItemsFor } from '../components/files/fsMenu';
+import { justFinished, touchesDir } from '../components/files/jobDirs';
 import type { MenuItem } from '../components/files/ContextMenu.vue';
 import { useFilesStore } from '../stores/files';
 import { useUploadsStore } from '../stores/uploads';
@@ -264,6 +265,39 @@ async function confirmDeleteNow() {
 // ---- 回收站 ----
 
 const trashOpen = ref(false);
+
+// ---- 任务完成后把列表刷回来 ----
+//
+// 删除/粘贴提交的是后台队列任务。提交完如果就此"失聪",用户删完看到的
+// 还是原来那一列（文件明明已从盘上没了），第一反应是没删掉、会再删一次。
+// 队列的闭环 = 任务到终态时把受影响的目录刷回来。
+//
+// 只在用户**正看着**那个目录时刷（touchesDir 为真且 dir 没变）:
+// 无脑刷新会把他正在翻的目录弹回第一页。跟 stores/uploads 的 refresh 同
+// 一条规则。
+//
+// 为什么 watch items 而不是订阅 WS done 事件：JobDrawer 已经在消费 fsjobs
+// 推送并写进同一个 store，这里读 store 的快照变化即可，不必重复接一路 WS。
+let prevActive = new Map<number, boolean>();
+watch(
+  () => jobs.items,
+  (items) => {
+    const dir = store.dir;
+    const next = new Map<number, boolean>();
+    for (const j of items) {
+      const active = j.state === 'pending' || j.state === 'running';
+      next.set(j.id, active);
+      const was = prevActive.get(j.id);
+      if (active) continue;
+      // 上一帧活跃、这一帧终态，且改的就是正在看的目录 —— 刷。
+      if (was === true && justFinished(was, j) && touchesDir(j, dir)) {
+        void store.open(dir);
+      }
+    }
+    prevActive = next;
+  },
+  { deep: true },
+);
 
 // ---- 上传 ----
 
