@@ -141,7 +141,7 @@ func TestErrorEventCarriesReasonFromStatusLookup(t *testing.T) {
 
 // 查原因失败不能让错误事件消失。tellStatus 可能因为 aria2 刚刚
 // removeDownloadResult 而查不到 gid；那时用户仍然需要知道“这条失败了”，
-// 带上一个兵底的文案也比没有强。
+// 带上一个兜底的文案也比没有强。
 func TestErrorEventSurvivesFailedLookup(t *testing.T) {
 	f := newFakeAria2(t)
 	r := &recorder{}

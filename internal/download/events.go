@@ -51,7 +51,7 @@ type Event struct {
 	Kind EventKind `json:"kind"`
 	GID  string    `json:"gid"`
 	// Error 是 aria2 给的失败原因原文（仅 EventError）。带原因而非只报
-	// "失败"是硬性要求；查不到时是兵底文案，不会是空串。
+	// "失败"是硬性要求；查不到时是兜底文案，不会是空串。
 	Error string `json:"error,omitempty"`
 	// At 是面板收到事件的时刻（秒）。aria2 不提供事件时间戳。
 	At int64 `json:"at"`
@@ -356,7 +356,7 @@ func (b *EventBridge) handle(ctx context.Context, raw []byte) {
 //
 // 必须补：实测 onDownloadError 的载荷**只有 gid**。不查就得不到原因，
 // 界面只能显示"下载失败"—— 用户明确反对过这种没有原因的错误提示。
-// 查失败（gid 已被 removeDownloadResult 清掉等）也要给出兵底文案，
+// 查失败（gid 已被 removeDownloadResult 清掉等）也要给出兜底文案，
 // 而不是让事件消失或留空。
 func (b *EventBridge) reasonFor(ctx context.Context, gid string) string {
 	if b.opt.Lookup == nil {

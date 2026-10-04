@@ -4,8 +4,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -47,6 +50,21 @@ type Config struct {
 	JobConcurrency int `toml:"job_concurrency"`
 	TLS            TLSConfig
 
+	// Aria2RPCURL 是 aria2 的 JSON-RPC 端点（D16：面板不拉起 aria2，只连它
+	// 的 RPC 与事件 WS；aria2 由 systemd 常驻托管）。
+	//
+	// 默认只绑 localhost 是安全决定而不是偷懒：aria2 的 addUri 能指定任意
+	// dir —— 一个能达的 aria2 RPC 就是一个无需身份的文件写入口。面板与
+	// aria2 同机，改成远程地址只能是显式配置。
+	Aria2RPCURL string `toml:"aria2_rpc_url"`
+	// Aria2RPCSecret 是 aria2 的 rpc-secret（部署时由 install.sh 生成）。
+	// 空串 = 不带 token：aria2 那边若配了 secret，所有调用会被回 -32000，
+	// 健康检查会把它当“未授权”报给用户，而不是静默空列表。
+	Aria2RPCSecret string `toml:"aria2_rpc_secret"`
+	// Aria2DownloadDir 是新建下载的默认保存目录（供前端表单预填）。
+	// 空串 = 不预填，aria2 用它自己的 --dir。
+	Aria2DownloadDir string `toml:"aria2_download_dir"`
+
 	// PasswordSet 由主程序在打开 DB 后回填：DB 中是否已存在密码。
 	PasswordSet bool `toml:"-"`
 }
@@ -60,6 +78,7 @@ func Defaults() Config {
 		TrashDirName:    ".trash",
 		TrashRetainDays: 3,
 		JobConcurrency:  2,
+		Aria2RPCURL:     "http://127.0.0.1:6800/jsonrpc",
 	}
 }
 
@@ -118,6 +137,9 @@ func (c Config) Validate() error {
 	if err := c.validateTrash(); err != nil {
 		return err
 	}
+	if err := c.validateAria2(); err != nil {
+		return err
+	}
 	// 与回收站天数的处理一致：配置文件是手写的，越界要**告知**而不是夹取。
 	// （运行期从设置页写入的值另有装配层兜底，两处职责不同。）
 	if c.JobConcurrency < 1 || c.JobConcurrency > 16 {
@@ -154,4 +176,43 @@ func (c Config) validateTrash() error {
 		return fmt.Errorf("trash_retain_days 应在 1–90 之间，当前 %d", c.TrashRetainDays)
 	}
 	return nil
+}
+
+// validateAria2 校验 aria2 RPC 地址（D16）。
+//
+// 为什么这属于"启动时拒绝"而不是"运行时报错"：这个配置的后果不是"下载失败"
+// 而是"在服务器上开了一个文件写入口"。aria2 的 addUri 能指定任意 dir，拿到
+// rpc-secret 就等于能在面板主机上落任意文件 —— 与监听 0.0.0.0 那几条门禁是
+// 同一类：扩大暴露面必须同时有对应的防护，而且必须在启动时说清楚，而不是在
+// 某次下载失败时让用户猜。
+//
+// 明文 http 只放行回环：面板与 aria2 同机是常态，回环上的流量不出网卡，
+// 密钥不裸奔；跨机就必须上 https（或自己拉隧道），这是显式可以做出的选择。
+func (c Config) validateAria2() error {
+	u := strings.TrimSpace(c.Aria2RPCURL)
+	if u == "" {
+		return errors.New("aria2_rpc_url 不能为空（默认 http://127.0.0.1:6800/jsonrpc；不想用下载功能也不能留空）")
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("aria2_rpc_url %q 不是合法的 RPC 地址，应形如 http://127.0.0.1:6800/jsonrpc", u)
+	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return fmt.Errorf("aria2_rpc_url %q 用明文 http 连非回环地址：rpc-secret 会在网络上裸奔，"+
+			"拿到它的人能在本机的任意目录写任意文件；跨机请改用 https，或在中间拉隧道后仍连 127.0.0.1", u)
+	}
+	return nil
+}
+
+// isLoopbackHost 判断主机名是否是回环地址。
+//
+// 用 net 解析而不是字符串比 "127.0.0.1"：IPv6 的 ::1、以及 "localhost"
+// 这种写法都是真回环；而把 "127.0.0.1.evil.com" 当成回环（前缀匹配的经典
+// 漏法）会把这条门禁整个绕过。
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

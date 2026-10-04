@@ -131,6 +131,8 @@ func main() {
 	// 跑完。因此池拿自己的上下文，关停时由 fileJobs.Stop 显式收。
 	// 具体理由见 jobs_wiring.go 头注。
 	fileJobs := startFileJobs(deps.Files)
+	// 下载的事件桥与进度轮询器（各自独立上下文，见 download_wiring.go）。
+	dlJobs := startDownloads(deps.Downloads)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -146,6 +148,10 @@ func main() {
 	// 真正的强约束是它必须在 srv.Shutdown 之后：否则"新提交一个 /fs/move"
 	// 与"池已停"能并发，用户拿到一个永远跑不了的 job_id。
 	fileJobs.Stop(ctx)
+	// 事件桥/轮询器在任务池之后、托管服务之前收：它们只是两个读 aria2 的
+	// 循环，没有需要"等跑完"的东西，取消上下文即可（aria2 自己继续下，
+	// 面板重启后靠对账 + 全量补齐接上）。
+	dlJobs.Stop()
 	if err := sup.Shutdown(ctx); err != nil {
 		logx.Info("关停托管服务: %v", err)
 	}
@@ -277,6 +283,7 @@ func bootServices(ctx context.Context, sup *service.Supervisor, db *store.DB) er
 // buildDeps 装配路由依赖。抽成函数是为了让安全参数与 -debug 连线可测。
 func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io.Writer) api.AuthDeps {
 	files := newFileService(db, cfg, hub)
+	downloads := newDownloadService(db, cfg, hub)
 	return api.AuthDeps{
 		DB:       db,
 		Hub:      hub,
@@ -310,6 +317,15 @@ func buildDeps(db *store.DB, cfg config.Config, hub *ws.Hub, debug bool, logw io
 		// 兜底 tick 才动**。"能跑但慢得没道理"比完全不跑更难被发现，
 		// 用户只会说"面板有点卡"。
 		Jobs: files,
+		// 下载（设计 D16/751）。aria2 不由面板拉起（它是 systemd 常驻的），
+		// 面板只连它的 RPC 与事件 WS，所以这里只需要地址与密钥；地址非法
+		// 在 config.Validate 就被拒了，走不到这行。
+		//
+		// 漏接的症状毫无攻击性：/api/dl/* 整片 501，而 501 在用户眼里就是
+		// "面板坏了"。它不能悄悄降级成"空列表" —— 那会被渲染成"你还没有
+		// 下载任务"，而真相是面板没接（两者要的动作完全不同，见
+		// handlers_aria2.go 头注）。
+		Downloads: downloads,
 	}
 }
 

@@ -318,6 +318,12 @@ func progressOf(st Status) Progress {
 	}
 }
 
+// A2int 解析 aria2 的字符串数字（空串/非法值一律 0，与所有字段解析一致）。
+//
+// 导出是为了装配层落终态时能复用**同一份**解析：手搓一份会在前缀 0、空串、
+// 溢出这些边角上与轮询器行为不同，而那种差异只在真实数据上才暴露。
+func A2int(s string) int64 { return a2int(s) }
+
 func a2int(s string) int64 {
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {

@@ -64,6 +64,13 @@ type AuthDeps struct {
 	// Commands 为 nil 时快捷命令接口返回 501（同上：200 + 空列表会被渲染
 	// 成"没有任何快捷命令"，把"面板没接这个模块"说成"你还没添加过"）。
 	Commands Commands
+
+	// Downloads 为 nil 时下载接口返回 501。这里 501 与"aria2 没起来"的 503
+	// 是**两个不同的码**，而且是刻意的：501 说"面板没接这个模块"（装配漏了，
+	// 用户做不了什么），503 说"aria2 没装/没起"（用户去装、去启动）。合成一个
+	// 码会把用户支到完全错误的方向 —— 他会去 apt install aria2，而面板根本没
+	// 往里接。
+	Downloads Downloads
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -169,6 +176,22 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 			a.Get("/fs/jobs", authed(handleFSJobList(deps.Jobs)))
 			a.Delete("/fs/jobs/{id}", authed(handleFSJobCancel(deps.Jobs)))
 			a.Post("/fs/jobs/{id}/retry", authed(handleFSJobRetry(deps.Jobs)))
+		}
+		// 下载（设计 751–760）。aria2 的 RPC 地址与密钥由 M7-T5 的设置热重载
+		// 提供，这里只依赖注入进来的实例；未注入时整套端点 501（见 AuthDeps
+		// 的字段注释：为什么不是 503）。
+		if deps.Downloads != nil {
+			dl := deps.Downloads
+			a.Get("/dl/health", authed(handleDLHealth(dl)))
+			a.Get("/dl/summary", authed(handleDLSummary(dl)))
+			a.Get("/dl/tasks", authed(handleDLTasks(dl)))
+			a.Post("/dl/tasks", authed(handleDLAdd(dl)))
+			// /dl/history 必须挂在 /dl/tasks/{gid} 之外：它是集合级的清除，
+			// 塞进 {gid} 下面会把 "history" 解成一个 gid。
+			a.Delete("/dl/history", authed(handleDLClearHistory(dl)))
+			a.Post("/dl/tasks/{gid}/pause", authed(handleDLControl(dl, dl.Pause)))
+			a.Post("/dl/tasks/{gid}/resume", authed(handleDLControl(dl, dl.Resume)))
+			a.Delete("/dl/tasks/{gid}", authed(handleDLRemove(dl)))
 		}
 		if deps.Metrics != nil {
 			// 性能监控快照公开（设计偏离，用户明确要求）：登录页也要画仪表。

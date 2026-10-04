@@ -266,3 +266,66 @@ func TestJobConcurrencyValidated(t *testing.T) {
 		})
 	}
 }
+
+// aria2 RPC 地址的安全门禁（D16 的落点）。
+//
+// 面板不拉起 aria2，只连它 —— 但**连到哪里**是面板配置里的一个决定，而这个
+// 决定的后果不对称：
+//
+//   - 明文 http 连远程地址：rpc-secret 在网络上裸奔，拿到它的人就能用
+//     addUri 指定任意 dir，在服务器上写任意文件。等于开一个无需身份的文件
+//     写入入口，而且没人会怀疑是自己的一行配置开的。
+//   - 空白名单、缺失字段：面板对着空 URL 发请求，用户看到的是"aria2 没起"，
+//     方向完全错。
+//
+// 与 0.0.0.0 那几条门禁同源：扩大暴露面必须同时有对应的防护，且必须在**启动
+// 时**说清楚，而不是在第一次下载失败时让用户猜。
+func TestValidateAria2RPCURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+		ok   bool
+	}{
+		{"默认 localhost 放行", "http://127.0.0.1:6800/jsonrpc", true},
+		{"localhost 主机名放行", "http://localhost:6800/jsonrpc", true},
+		{"IPv6 回环放行", "http://[::1]:6800/jsonrpc", true},
+		{"https 到远程放行（带密钥不算裸奔）", "https://aria2.internal:6800/jsonrpc", true},
+		{"明文 http 到远程拒绝", "http://10.0.0.5:6800/jsonrpc", false},
+		{"空 URL 拒绝", "", false},
+		{"没有协议拒绝", "127.0.0.1:6800/jsonrpc", false},
+		{"不是 URL 的字符串拒绝", "aria2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			c.Aria2RPCURL = tc.url
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Errorf("%q 不该报错: %v", tc.url, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("%q 该报错却没有", tc.url)
+			}
+		})
+	}
+}
+
+// https 之外的加密形态不算数：file://、ftp:// 这类地址会被 net/http 直接拒
+// （面板侧报一句看不懂的错），或者更糟：悄悄连到别的东西上。
+func TestValidateAria2RPCURLScheme(t *testing.T) {
+	c := Defaults()
+	c.Aria2RPCURL = "ftp://127.0.0.1:6800/jsonrpc"
+	if err := c.Validate(); err == nil {
+		t.Error("非 http/https 协议该被拒")
+	}
+}
+
+// 默认值本身必须能通过校验。
+//
+// 否则"用户什么都没配"就等于"面板起不来"，而默认值恰恰是最常走的那条路径
+// （首次安装）。这条看起来是废话的断言，实测挡过一次：默认值写成了不带协议
+// 的 "127.0.0.1:6800/jsonrpc"。
+func TestDefaultsPassValidation(t *testing.T) {
+	if err := Defaults().Validate(); err != nil {
+		t.Fatalf("默认配置应能通过校验: %v", err)
+	}
+}

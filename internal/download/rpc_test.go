@@ -185,3 +185,37 @@ func TestNilParamsMarshalsAsEmptyArray(t *testing.T) {
 		t.Errorf("无参调用应发空数组, 实际发出: %s", seen)
 	}
 }
+
+// UnavailableClient 的所有方法都必须是"不可达"而不是 panic 或假成功。
+//
+// 它是装配层在地址非法时塞进来的替代品，存在的唯一意义是"让下载变成 503"。
+// 任何一个方法漏了这道拦截（尤其是走 callWithAuth 之外的路径的），后果都是
+// 对上层伪装成正常客户端 —— 比报错难查得多。
+func TestUnavailableClientFailsEveryMethod(t *testing.T) {
+	c := UnavailableClient(errors.New("地址不合法"))
+	ctx := context.Background()
+	_, err := c.GetVersion(ctx)
+	if !IsUnavailable(err) {
+		t.Errorf("GetVersion 要报不可达（健康检查靠它才显示未授权/未安装）: %v", err)
+	}
+	if _, err := c.AddURI(ctx, []string{"https://x/a"}, Options{}); !IsUnavailable(err) {
+		t.Errorf("AddURI: %v", err)
+	}
+	if _, err := c.TellActive(ctx); !IsUnavailable(err) {
+		t.Errorf("TellActive: %v", err)
+	}
+	if _, err := c.TellStatus(ctx, "0x1"); !IsUnavailable(err) {
+		t.Errorf("TellStatus: %v", err)
+	}
+	if err := c.Pause(ctx, "0x1"); !IsUnavailable(err) {
+		t.Errorf("Pause: %v", err)
+	}
+	if _, err := c.GetGlobalStat(ctx); !IsUnavailable(err) {
+		t.Errorf("GetGlobalStat: %v", err)
+	}
+	// 原因要带上：503 的 detail 里只有"连不上"而没有一个真实原因，运维会
+	// 去查 aria2 而问题在自己的配置文件里。
+	if !strings.Contains(err.Error(), "地址不合法") {
+		t.Errorf("原始原因要能透出来: %v", err)
+	}
+}

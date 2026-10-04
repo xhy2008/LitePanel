@@ -53,6 +53,13 @@ func IsUnavailable(err error) bool {
 	return errors.As(err, &ue)
 }
 
+// NewUnavailable 把一个底层错误包装成"aria2 不可达"。
+//
+// 导出的理由不是给生产代码用（生产里只有 call() 会造这种错），而是让 handler
+// 测试能造出一个**真能**被 IsUnavailable 认出来的错误。测试手搓一个
+// errors.New("connection refused") 不会满足这个哨，于是测的是个假分支。
+func NewUnavailable(err error) error { return &unavailableError{err: err} }
+
 // RPCRequest 是发出去的 JSON-RPC 2.0 请求。导出仅为了测试能直接断言它的
 // 形状（协议正确性只有看到最终 JSON 才测得到）。
 type RPCRequest struct {
@@ -107,6 +114,8 @@ type Client struct {
 	url    string
 	secret string
 	http   *http.Client
+	// alwaysErr 非 nil 时所有调用立即失败为该错误（见 UnavailableClient）。
+	alwaysErr error
 }
 
 // NewClient 连接 aria2 的 RPC 端点。rpcURL 形如 http://127.0.0.1:6800/jsonrpc。
@@ -135,6 +144,9 @@ func (c *Client) Close() { c.http.CloseIdleConnections() }
 
 // call 发一次 JSON-RPC。result 为 nil 时丢弃返回值。
 func (c *Client) call(ctx context.Context, method string, params []any, result any) error {
+	if c.alwaysErr != nil {
+		return &unavailableError{err: fmt.Errorf("aria2 客户端不可用（%v）: 调用 %s", c.alwaysErr, method)}
+	}
 	// params 为 nil 时 Go 会 marshal 成 JSON null，而 aria2 对 "params": null
 	// 回 -32602 Invalid params（实测 1.37.0：null 被拒，[] 或不带该字段都正常）。
 	// 不规范化 nil 的后果是"无参方法全都调不通"，包括 getVersion —— 那会让
@@ -324,4 +336,15 @@ func (c *Client) GetGlobalStat(ctx context.Context) (*GlobalStat, error) {
 		return nil, err
 	}
 	return &g, nil
+}
+
+// UnavailableClient 是一个"永远不可达"的 aria2 实现。
+//
+// 存在的理由：装配层拿到一个非法 RPC 地址时（config.Validate 之外的直接调用，
+// 比如测试或未来的热重载传错），它需要一个**能用**的客户端而不是 nil —— 否则
+// 每个 HTTP 请求都会在对 nil 调方法时 panic，把"下载配置错了"升级成"面板
+// 崩了"。用它构造的 Service 会把所有调用变成 unavailableError，用户看到的
+// 是与"aria2 没起"同样的 503 + 装配层记下的真实原因。
+func UnavailableClient(reason error) *Client {
+	return &Client{alwaysErr: reason}
 }

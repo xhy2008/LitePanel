@@ -417,3 +417,29 @@ func (s *TaskStore) Reconcile(ctx context.Context, alive func(gid string) bool) 
 	}
 	return n, nil
 }
+
+// CountByState 按状态数条数（汇总条要"已完成 40 个"这样的数字）。
+//
+// 用一次 GROUP BY 而不是 List 之后在 Go 里数：历史可能有 MaxHistory 条，
+// 只为数个数把它们全部读出来（还带 uri 的 JSON 解析）不值得。
+func (s *TaskStore) CountByState(ctx context.Context) (map[State]int, error) {
+	db, err := s.sqlDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT state, COUNT(*) FROM downloads GROUP BY state`)
+	if err != nil {
+		return nil, fmt.Errorf("统计下载记录: %w", err)
+	}
+	defer rows.Close()
+	out := map[State]int{}
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err != nil {
+			return nil, fmt.Errorf("统计下载记录: %w", err)
+		}
+		out[State(st)] = n
+	}
+	return out, rows.Err()
+}
