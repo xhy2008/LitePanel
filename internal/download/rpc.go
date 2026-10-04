@@ -135,6 +135,13 @@ func (c *Client) Close() { c.http.CloseIdleConnections() }
 
 // call 发一次 JSON-RPC。result 为 nil 时丢弃返回值。
 func (c *Client) call(ctx context.Context, method string, params []any, result any) error {
+	// params 为 nil 时 Go 会 marshal 成 JSON null，而 aria2 对 "params": null
+	// 回 -32602 Invalid params（实测 1.37.0：null 被拒，[] 或不带该字段都正常）。
+	// 不规范化 nil 的后果是"无参方法全都调不通"，包括 getVersion —— 那会让
+	// 探活永远报不可达，下载页显示"aria2 没装"，而它其实跑得好好的。
+	if params == nil {
+		params = []any{}
+	}
 	body, err := json.Marshal(RPCRequest{JSONRPC: "2.0", Method: method, Params: params, ID: 1})
 	if err != nil {
 		return fmt.Errorf("编码 aria2 请求: %w", err)

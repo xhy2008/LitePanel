@@ -3,6 +3,8 @@ package download
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -148,5 +150,38 @@ func TestUnreachableIsNotAnRPCError(t *testing.T) {
 	}
 	if !IsUnavailable(err) {
 		t.Errorf("要能用 IsUnavailable 判出「aria2 不可达」，handler 才能回 503: %v", err)
+	}
+}
+
+// 实测（aria2 1.37.0）：`"params": null` 被拒（-32602 Invalid params.），
+// `"params": []` 与不带该字段都正常。Go 侧 nil slice marshal 出来正是 null，
+// 于是所有无参方法（getVersion / getGlobalStat）都会失败 —— 而 getVersion
+// 是探活用的一次调用，它失败就等于"aria2 永远不可达"，下载页会显示"没装"
+// 而它其实跑得好好的。所以这条断言直接看**发出去的 JSON 里 params 是不是
+// null**：编码之后 nil 与空 slice 分不开，必须在这一刻拦住。
+func TestNilParamsMarshalsAsEmptyArray(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		seen = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"version":"1.37.0"}}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.GetVersion(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// 注意判断串用拼接而不是反引号原文：这里是"字面量里含双引号"，
+	// 用反引号会被下面那句 t.Errorf 的格式串搅浑，改用字符串拼接最省事。
+	if strings.Contains(seen, "params"+`":null`) {
+		t.Errorf("aria2 会拒绝 params 为 null（实测 -32602）, 实际发出: %s", seen)
+	}
+	if !strings.Contains(seen, "params"+`":[]`) {
+		t.Errorf("无参调用应发空数组, 实际发出: %s", seen)
 	}
 }
