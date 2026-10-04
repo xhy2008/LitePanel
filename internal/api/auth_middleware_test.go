@@ -38,6 +38,33 @@ func newHarness(t *testing.T) *harness {
 	return newHarnessWith(t, nil)
 }
 
+// testPassword 是共享底座的口令。它必须是真值而不是占位串：
+// TestLoginLockout 那几个要真的走一次 POST /api/login 并成功。
+const testPassword = "test-password"
+
+// testPasswordHash 只算一次。
+//
+// 这不是"为了快而把真实现换成假的"：cost=12 的 bcrypt 在这台 ARM 机器上
+// 实测 266ms（见 dev/bench 的探针），而本包 193 个测试里有 190 个建底座 ——
+// 光重复哈希**同一个**口令就占了整包 162s 里的 ~51s。
+//
+// 为什么可以共用一个 hash：鉴权路径上没有任何地方重新校验它。requireAuth 走
+// Sessions.Validate（查 token），强制改密闸门（MustChangePassword）只看
+// password_hash 非空与 must_change_password 标志；真正会校验明文的只有
+// /api/login，而那些测试用的就是上面这个 test-password，所以"同一个口令的
+// 同一个 hash"与"每次新算一个"对它们完全等价（bcrypt 的 salt 只影响摘要本身，
+// CheckPassword 从摘要里取 salt）。
+//
+// 写成包级变量而不是 sync.Once：Go 的包初始化天然只跑一次，而 Once 会让
+// "这里省了 266ms"这件事在代码里看起来像个优化技巧，实际它就是个常量。
+var testPasswordHash = func() string {
+	h, err := auth.HashPassword(testPassword)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
+
 // newHarnessWith 是可参数化装配：模块 Deps（Services/Files/...）由各测试
 // 自己塞进来。之所以是"改 deps 的回调"而不是一堆 newHarnessXxx 变体：
 // 每加一个模块就多一个变体，而底座那 20 行装配（含密码 hash 入库）会被
@@ -52,12 +79,8 @@ func newHarnessWith(t *testing.T, mutate func(*api.AuthDeps)) *harness {
 	t.Cleanup(func() { db.Close() })
 
 	clk := &clock{now: time.Unix(1_800_000_000, 0)}
-	hash, err := auth.HashPassword("test-password")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := db.SqlDB().Exec(
-		`INSERT INTO settings(key,value,updated_at) VALUES('password_hash',?,1)`, hash,
+		`INSERT INTO settings(key,value,updated_at) VALUES('password_hash',?,1)`, testPasswordHash,
 	); err != nil {
 		t.Fatal(err)
 	}
