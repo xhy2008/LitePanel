@@ -715,3 +715,82 @@ func TestTerminalSizesNotOverwrittenByStaleProgress(t *testing.T) {
 		t.Errorf("已完成的任务速度应为 0，不能显示上一轮的 %d", got.Speed)
 	}
 }
+
+// 面板默认（目录 / 分片数）必须在用户没指定时注入到 aria2 和本地记录。
+//
+// 这条是 term_history_limit 同款问题的下载侧：设置项存了，如果 Add 不读
+// 它就是"只存不读"的摆设。
+func TestAddAppliesPanelDefaults(t *testing.T) {
+	e := newSvcEnv(t)
+	e.svc.SetDefaults("/data/dl", 8)
+	// 本地记录必须带同一个 dir：否则下载页每条任务的"下载到"都是空的。
+	view, err := e.svc.Add(context.Background(), AddInput{URIs: []string{"https://x/a.bin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.rpc.lastOpts.Dir != "/data/dl" {
+		t.Errorf("aria2 侧的 dir 应取面板默认，得 %q", e.rpc.lastOpts.Dir)
+	}
+	if e.rpc.lastOpts.Split != 8 {
+		t.Errorf("aria2 侧的 split 应取面板默认，得 %d", e.rpc.lastOpts.Split)
+	}
+	if view.Dir != "/data/dl" {
+		t.Errorf("任务视图的 dir 应是面板默认，得 %q", view.Dir)
+	}
+}
+
+// 用户显式指定的值优先于面板默认。
+func TestAddExplicitBeatsDefaults(t *testing.T) {
+	e := newSvcEnv(t)
+	e.svc.SetDefaults("/data/dl", 8)
+	if _, err := e.svc.Add(context.Background(), AddInput{
+		URIs: []string{"https://x/a.bin"}, Dir: "/elsewhere", Split: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if e.rpc.lastOpts.Dir != "/elsewhere" || e.rpc.lastOpts.Split != 3 {
+		t.Errorf("显式值应优先，得 dir=%q split=%d", e.rpc.lastOpts.Dir, e.rpc.lastOpts.Split)
+	}
+}
+
+// SetDefaults 之后新建的任务用新默认（热生效的"热"就是这里）。
+func TestSetDefaultsTakesEffectImmediately(t *testing.T) {
+	e := newSvcEnv(t)
+	e.svc.SetDefaults("/first", 2)
+	e.svc.Add(context.Background(), AddInput{URIs: []string{"https://x/a.bin"}})
+	first := e.rpc.lastOpts.Dir
+	e.svc.SetDefaults("/second", 16)
+	e.svc.Add(context.Background(), AddInput{URIs: []string{"https://x/b.bin"}})
+	if first != "/first" {
+		t.Fatalf("前置条件：第一条应是 /first，得 %q", first)
+	}
+	if e.rpc.lastOpts.Dir != "/second" || e.rpc.lastOpts.Split != 16 {
+		t.Errorf("改默认后新任务应跟新值，得 dir=%q split=%d", e.rpc.lastOpts.Dir, e.rpc.lastOpts.Split)
+	}
+}
+
+// 默认值夹上界：设置里的 split 若越界，注入前必须夹住。
+// MaxSplit 那道护栏是为了挡住"从网页发起的资源放大"，面板默认这条路径
+// 也必须过同一道，否则设置表成为一个绕过 MaxSplit 的后门。
+func TestSetDefaultsClampsSplit(t *testing.T) {
+	e := newSvcEnv(t)
+	e.svc.SetDefaults("", MaxSplit*10)
+	if _, err := e.svc.Add(context.Background(), AddInput{URIs: []string{"https://x/a.bin"}}); err != nil {
+		t.Fatal(err)
+	}
+	if e.rpc.lastOpts.Split > MaxSplit {
+		t.Errorf("默认 split Injected 前应夹到 %d，得 %d", MaxSplit, e.rpc.lastOpts.Split)
+	}
+}
+
+// 没有任何默认时（未调用 SetDefaults）行为不变：dir 空、split 交给 aria2。
+// NewService 的 nil 初值是 ""/0，Add 不能因为读它而报错或凭空填值。
+func TestAddWithoutDefaults(t *testing.T) {
+	e := newSvcEnv(t)
+	if _, err := e.svc.Add(context.Background(), AddInput{URIs: []string{"https://x/a.bin"}}); err != nil {
+		t.Fatal(err)
+	}
+	if e.rpc.lastOpts.Dir != "" || e.rpc.lastOpts.Split != 0 {
+		t.Errorf("无默认时应原样不发 dir/split，得 %#v", e.rpc.lastOpts)
+	}
+}

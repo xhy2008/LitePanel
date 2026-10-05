@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -134,14 +135,24 @@ type Service struct {
 	// —— 前端把任意多条事件合并成一次列表刷新，多发一条只是多一次 GET。
 	ViaWS func(Event)
 
+	// add 是"新任务的面板侧默认"（下载目录 / 分片数），设置页可热改。
+	addDefaults atomic.Pointer[addDefaults]
+
 	mu       sync.Mutex
 	progress map[string]Progress
 	poller   *Poller
 }
 
+// addDefaults 是新建下载任务时注入的面板默认值。
+type addDefaults struct {
+	dir   string
+	split int
+}
+
 // NewService 装配下载模块。
 func NewService(a2 aria2, tasks *TaskStore, opt ServiceOptions) *Service {
 	s := &Service{a2: a2, tasks: tasks, progress: map[string]Progress{}, opt: opt}
+	s.addDefaults.Store(&addDefaults{}) // 非 nil 初值：读侧不必每处判空
 	s.probe = NewHealthChecker(a2, opt.HealthTTL)
 	s.poller = NewPoller(
 		func(ctx context.Context) ([]Status, error) { return a2.TellActive(ctx) },
@@ -467,23 +478,54 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 // 顺序反过来（先落库）会在 aria2 拒绝时留下一条永远不动的幽灵记录：历史里
 // 挂着一条 active、进度永远 0、aria2 那边根本没这个 gid，而且它还会在下次
 // 启动对账时被收口成"失败" —— 用户在历史里看到一条自己从没成功提交过的下载。
+// SetDefaults 设新任务的面板默认（下载目录 / 分片数），设置页热生效。
+//
+// 只影响之后新建的任务：dir 与 split 都是 aria2 的**每任务**选项，已在
+// 下载的任务改不了（aria2 没有"把这个进行中的任务挪到别的目录"这种操作）。
+// 界面上要说清"对进行中的任务无效"，不能让用户以为改了所有任务就搬家了。
+func (s *Service) SetDefaults(dir string, split int) {
+	if split < 0 {
+		split = 0
+	}
+	if split > MaxSplit {
+		split = MaxSplit
+	}
+	s.addDefaults.Store(&addDefaults{dir: dir, split: split})
+}
+
 func (s *Service) Add(ctx context.Context, in AddInput) (TaskView, error) {
 	var zero TaskView
 	if len(in.URIs) == 0 {
 		return zero, errors.New("下载地址不能为空")
 	}
-	split := in.Split
+	// 用户没指定时用设置页的面板默认。
+	//
+	// 为什么要在**这里**填而不是让 aria2 的全局默认兜住：面板自己那张任务表
+	// 也记着 dir，列表要显示"下载到哪"。如果只在 aria2 侧设全局默认而本地
+	// 记空串，界面上每条任务的目的地都是空的 —— 用户看不到文件落在哪，
+	// 而"文件在哪"是下载页最需要回答的问题。
+	// 不判 nil：NewService 存了非 nil 初值，SetDefaults 也只存非 nil 指针，
+	// "恒非 nil"是构造期建立的不变式。判空会把它的破坏静默降级成"默认值
+	// 悄悄变成零"，而零目录意味着文件下到 aria2 自己的当前目录——比崩溃更难查。
+	d := s.addDefaults.Load()
+	dir, split := in.Dir, in.Split
+	if dir == "" {
+		dir = d.dir
+	}
+	if split == 0 {
+		split = d.split
+	}
 	if split > MaxSplit {
 		split = MaxSplit
 	}
 	if split < 0 {
 		split = 0
 	}
-	gid, err := s.a2.AddURI(ctx, in.URIs, Options{Dir: in.Dir, Out: in.Out, Split: split})
+	gid, err := s.a2.AddURI(ctx, in.URIs, Options{Dir: dir, Out: in.Out, Split: split})
 	if err != nil {
 		return zero, err
 	}
-	rec, err := s.tasks.Add(ctx, Submission{URIs: in.URIs, GID: gid, Dir: in.Dir, Name: in.Out})
+	rec, err := s.tasks.Add(ctx, Submission{URIs: in.URIs, GID: gid, Dir: dir, Name: in.Out})
 	if err != nil {
 		// aria2 已经收下而本地没记下：任务会正常下载，只是不在面板历史里。
 		// 报错但不回滚（强撤一个已经在下载的任务更糟）；错误原文带上前因，
