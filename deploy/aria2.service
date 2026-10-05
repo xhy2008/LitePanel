@@ -1,0 +1,33 @@
+[Unit]
+Description=aria2 download daemon (JSON-RPC on localhost)
+Documentation=file:/usr/local/share/litepanel/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# D16：aria2 由 systemd 常驻托管，面板只连它的 RPC 与事件 WS，
+# 永远不负责拉起/杀掉它。
+User=root
+Type=simple
+# rpc-secret 与下载目录都不写进单元文件（单元文件 world-readable，还进
+# git；目录是 install.sh 按"最大可用容量挂载点"探测出来的机器值）：
+# 由 install.sh 生成到 0600 的 env 文件，Exec* 里 systemd 展开。
+# 单一来源同时喂面板的 aria2_download_dir 预填，两边不可能漂移。
+EnvironmentFile=/etc/litepanel/aria2.env
+ExecStartPre=/usr/bin/install -d -m 0700 ${A2_DIR} /var/lib/litepanel/aria2
+ExecStart=/usr/bin/aria2c \
+    --enable-rpc \
+    --rpc-listen-port=6800 \
+    --rpc-listen-all=false \
+    --rpc-secret=${A2_RPC_SECRET} \
+    --dir=${A2_DIR} \
+    --save-session=/var/lib/litepanel/aria2/session.txt \
+    --input-file=/var/lib/litepanel/aria2/session.txt \
+    --save-session-interval=5 \
+    --continue=true
+Restart=always
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

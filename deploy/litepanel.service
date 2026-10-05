@@ -1,0 +1,24 @@
+[Unit]
+Description=litepanel - 轻量服务器管理面板
+Documentation=file:/usr/local/share/litepanel/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# D7：面板以 root 运行（管理任意用户的服务、读写任意盘上的文件），
+# 暴露面由"默认只绑 tailscale 地址"约束，而不是靠降权。
+User=root
+Type=simple
+# 显式传 -config：defaultConfigPath 的自动探测依赖 /etc/litepanel 存在，
+# 写死在 ExecStart 里让"用的哪份配置"在 systemctl cat 里一眼可见。
+ExecStart=/usr/local/bin/litepanel -config /etc/litepanel/config.toml
+WorkingDirectory=/var/lib/litepanel
+Restart=always
+RestartSec=2s
+# 面板自身不落任何日志文件（D9）：stdout/stderr 归 journald。
+# 启动失败时的一次性初始密码/错误摘要（R4）用 journalctl -u litepanel 读。
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

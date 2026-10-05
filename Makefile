@@ -58,9 +58,11 @@ smoke: build
 smoke-restart: build
 	bash tools/smoke_restart.sh
 
+# 安装/升级的唯一入口是脚本：单元、密钥、数据目录、配置模板的逻辑都在
+# 那里；Makefile 再抄一份 install 命令迟早会和脚本漂移（漏装 aria2.service
+# 这类事故就是这么来的）。
 install: build
-	install -Dm755 bin/litepanel /usr/local/bin/litepanel
-	install -Dm644 deploy/litepanel.service /etc/systemd/system/litepanel.service
+	bash deploy/install.sh
 
 clean:
 	rm -rf bin internal/webdist/dist

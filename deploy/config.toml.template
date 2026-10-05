@@ -1,0 +1,37 @@
+# litepanel 配置（/etc/litepanel/config.toml）
+# 由 install.sh 生成；改完 systemctl restart litepanel 生效。
+# 大部分运行期参数已迁移到面板"设置"页（存数据库、保存即热生效）；
+# 这里只留必须重启的启动参数。
+
+# 监听地址（设计 D7）："tailscale" = 自动探测 tailscale IPv4，探测不到
+# 回落 127.0.0.1（回落时 journalctl 里会有一行提示）。
+# 改成 0.0.0.0 是扩大暴露面：面板会强制要求已设密码 + 启用 TLS，
+# 否则拒绝启动（原因见 journalctl -u litepanel）。
+listen = "tailscale"
+port = 9530
+
+# SQLite 数据库位置。首次启动生成的一次性初始密码只打一次
+# journalctl -u litepanel；密码本身存这里，改密码后以库为准。
+db_path = "/var/lib/litepanel/litepanel.db"
+
+[tls]
+# 面板只从 cert_file/key_file 加载证书，没有运行时自动签发。
+# 签证书任选其一：
+#   自签（最简单，install.sh 可代做）：见 README "HTTPS" 一节
+#   tailscale cert 签发到文件，再把路径填这里
+# 注意：tailscale_cert=true 只免除配置校验里的路径非空检查，监听仍要
+# 真实的 cert_file/key_file —— 两个都要填。
+enabled = false
+cert_file = ""
+key_file = ""
+tailscale_cert = false
+
+# aria2（设计 D16：aria2 由 systemd 的 aria2.service 常驻托管，面板只连它）。
+# 这两项必须与 /etc/litepanel/aria2.env 和 aria2.service 保持一致；
+# install.sh 会自动写成一致的。改动后需同时重启 aria2 与面板。
+aria2_rpc_url = "http://127.0.0.1:6800/jsonrpc"
+aria2_rpc_secret = "REPLACED_BY_INSTALL"
+
+# 新建下载的默认目录（设置页的预填值）。install.sh 填的是"最大可用容量
+# 挂载点/downloads"（设计 4.2），与 aria2.service 的 --dir 同源。
+aria2_download_dir = "REPLACED_BY_INSTALL_DIR"
