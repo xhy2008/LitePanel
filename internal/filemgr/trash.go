@@ -954,6 +954,12 @@ func (s *Service) trashedOrigins(ctx context.Context) (map[string]bool, error) {
 //
 // 保留期的新值对**已存在**的条目立刻生效（CleanTrash 每次都用当前值算
 // cutoff）：这是用户期望的方向（调到 1 天就是想快点清掉），不是 bug。
+// TrashPolicy 返回当前回收站目录名与保留期（读侧，见 SetTrashPolicy）。
+func (s *Service) TrashPolicy() (string, time.Duration) {
+	p := s.trash()
+	return p.dirName, p.retain
+}
+
 func (s *Service) SetTrashPolicy(ctx context.Context, dirName string, retain time.Duration) (int, error) {
 	name := strings.TrimSpace(dirName)
 	if name == "" {

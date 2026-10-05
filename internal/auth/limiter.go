@@ -72,6 +72,14 @@ func (l *LoginLimiter) Fail(ip string) {
 	}
 }
 
+// Policy 返回当前锁定阈值与窗口。与 SetPolicy 对称：没有读侧的话，
+// "保存后策略到底变了没有"就只能靠反复 Fail 去侧面推断，那既慢又脆。
+func (l *LoginLimiter) Policy() (int, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.maxFails, l.window
+}
+
 // SetPolicy 热改锁定阈值与窗口（设置页）。
 //
 // 读 maxFails/window 的几处（Allowed/Fail/Prune）都已经持 l.mu，所以这里

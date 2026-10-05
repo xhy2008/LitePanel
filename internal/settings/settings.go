@@ -81,17 +81,17 @@ const (
 // 与 config 有重叠的键（回收站、并发、aria2）由装配层用 config 兜底，
 // 所以那些键的默认值在这里是 zero，见 Def 的 ConfigFallback 说明。
 const (
-	DefaultMetricIntervalSec = 1
-	DefaultSessionTTLDays    = 30
-	DefaultLoginMaxFails     = 5
-	DefaultLoginWindowMin    = 10
-	DefaultTrashRetainDays   = 3
-	DefaultJobConcurrency    = 2
-	DefaultServiceLogLines   = 500
-	DefaultStopGraceSec      = 10
-	DefaultTermHistoryLimit  = 20000
-	DefaultAria2MaxConcurren = 5
-	DefaultAria2Split        = 5
+	DefaultMetricIntervalSec  = 1
+	DefaultSessionTTLDays     = 30
+	DefaultLoginMaxFails      = 5
+	DefaultLoginWindowMin     = 10
+	DefaultTrashRetainDays    = 3
+	DefaultJobConcurrency     = 2
+	DefaultServiceLogLines    = 500
+	DefaultStopGraceSec       = 10
+	DefaultTermHistoryLimit   = 20000
+	DefaultAria2MaxConcurrent = 5
+	DefaultAria2Split         = 5
 )
 
 // Kind 决定 GET 时怎么序列化、PUT 时怎么解析与校验。
@@ -124,6 +124,19 @@ type Def struct {
 	Default string
 	// Secret 标记"值不该原样出现在 GET 响应里"（aria2 的 RPC 密钥）。
 	Secret bool
+	// RestartRequired = 改了只能重启才生效，设置页要如实打上"重启生效"标。
+	//
+	// aria2_rpc_url / aria2_rpc_secret 标它是**领域事实**而不是偷懒：这两个值
+	// 只在 aria2 自己的启动参数里变（aria2 由 systemd 常驻、面板不拉起它，
+	// 见 D16）。改端点必然要改 aria2 的命令行并重启 aria2 —— 面板这边就算
+	// 热重连了一个新地址，aria2 没在新地址监听也是白搭。所以"改完重启"不是
+	// 面板的限制，是这件事本身的性质。
+	//
+	// 这个字段存在的唯一理由是**让"只存不读"在结构上不可能**：装配层测试
+	// 遍历注册表，要求每一项要么是 applier 认识的键（保存后立刻推给子系统）,
+	// 要么 RestartRequired=true。新增一项而忘了这两件事之一，测试立刻红。
+	// 没有这个标记时，"忘了接"与"确实需要重启"在代码里长得一模一样。
+	RestartRequired bool
 	// Validate 做 Kind 之外的额外校验（回收站目录名必须是单个路径段）。
 	Validate func(string) error
 }
@@ -157,12 +170,12 @@ var registry = []Def{
 		Unit: "行", Enum: []int{5000, 20000, 100000}, Default: strconv.Itoa(DefaultTermHistoryLimit)},
 
 	{Key: Aria2RPCURL, Group: "download", Kind: KindStr, Label: "aria2 RPC 地址",
-		Validate: validateRPCURL},
+		Validate: validateRPCURL, RestartRequired: true},
 	{Key: Aria2RPCSecret, Group: "download", Kind: KindStr, Label: "aria2 RPC 密钥",
-		Secret: true},
+		Secret: true, RestartRequired: true},
 	{Key: Aria2DownloadDir, Group: "download", Kind: KindStr, Label: "默认下载目录"},
 	{Key: Aria2MaxConcurrent, Group: "download", Kind: KindInt, Label: "最大并发任务数",
-		Unit: "个", Min: 1, Max: 20, Default: strconv.Itoa(DefaultAria2MaxConcurren)},
+		Unit: "个", Min: 1, Max: 20, Default: strconv.Itoa(DefaultAria2MaxConcurrent)},
 	{Key: Aria2Split, Group: "download", Kind: KindInt, Label: "单任务分片数",
 		Unit: "个", Min: 1, Max: 16, Default: strconv.Itoa(DefaultAria2Split)},
 }
@@ -402,17 +415,33 @@ func parse(d Def, raw json.RawMessage) (string, error) {
 }
 
 // Snapshot 是一次读取的设置集合，供装配层取值（比逐个 Get 少 N 次查询）。
+//
+// 存的是**生效值**而不是库里原样：查找顺序仍是 库里 > config > 内置默认，
+// 与 All() 完全一致。这一点关键 —— 装配层如果自己再兑一遍 config 与内置
+// 默认，就出现了"兑底顺序"的第二个主人；两处一旦漂移，就会 GET 显示一个
+// 值而子系统按另一个值跑，而这种不一致从任何一个侧面看都"正常"。
 type Snapshot struct {
 	m map[string]string
 }
 
-// Load 读一份快照（库里没写的键不出现，由 Get 的调用方自己兜默认）。
+// Load 读一份快照，每一项都是按 DB > config > 内置默认解析后的生效值。
 func (s *Store) Load(ctx context.Context) (*Snapshot, error) {
 	raw, err := s.raw(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Snapshot{m: raw}, nil
+	eff := make(map[string]string, len(raw)+len(registry))
+	for _, d := range registry {
+		if v, ok := raw[string(d.Key)]; ok {
+			eff[string(d.Key)] = v
+			continue
+		}
+		// 与 All() 共用同一个 fallback：库里没有 -> 问 config -> 内置默认。
+		if v := s.fallback(d.Key, d.Default); v != "" {
+			eff[string(d.Key)] = v
+		}
+	}
+	return &Snapshot{m: eff}, nil
 }
 
 // String 取字符串值，没有则回 def。

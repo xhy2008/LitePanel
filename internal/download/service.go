@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -478,11 +479,49 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 // 顺序反过来（先落库）会在 aria2 拒绝时留下一条永远不动的幽灵记录：历史里
 // 挂着一条 active、进度永远 0、aria2 那边根本没这个 gid，而且它还会在下次
 // 启动对账时被收口成"失败" —— 用户在历史里看到一条自己从没成功提交过的下载。
+// ApplyGlobalMaxConcurrent 把"最大并发任务数"推到 aria2 自己的全局选项。
+//
+// 为什么这一项不能像目录/分片那样只在面板侧处理：排队是 aria2 做的——
+// 超过 max-concurrent-downloads 的任务在 aria2 里排队，面板提交多少都插不
+// 进去。面板侧记一个数字只会让"界面写着并发 10、实际同时在下的还是 5 个"。
+//
+// 与 SetDefaults 的分工是刻意的：dir/split 是**每任务**选项， aria2 的
+// changeGlobalOption 对它们只影响之后的新任务（实测见 dev/aria2opt），
+// 我们既然要在 Add 时注入默认，就不需要走全局选项；而排队上限没有
+// per-task 等价物，只能走 changeGlobalOption。
+//
+// 客户端可以是 UnavailableClient（aria2 没起）：那时这里报错，装配层如实
+// 报给界面"已保存但未能立即生效"，而不是假装成功。
+func (s *Service) ApplyGlobalMaxConcurrent(ctx context.Context, n int) error {
+	if n < 1 {
+		return fmt.Errorf("aria2 并发任务数必须至少为 1，当前 %d", n)
+	}
+	// 类型断言而不是把 ChangeGlobalOption 加进 aria2 接口：接口是给 Service
+	// 自己用的能力面，而这个方法只有装配层用。加进接口会逼所有测试替身
+	// 补一个它们不关心的方法（api 层的接口拆分吃过同样的亏，见 AuthDeps
+	// 的 Files/Jobs 注释）。
+	opt, ok := s.a2.(interface {
+		ChangeGlobalOption(context.Context, map[string]string) error
+	})
+	if !ok {
+		return fmt.Errorf("当前 aria2 客户端不支持改全局选项")
+	}
+	return opt.ChangeGlobalOption(ctx, map[string]string{
+		"max-concurrent-downloads": strconv.Itoa(n),
+	})
+}
+
 // SetDefaults 设新任务的面板默认（下载目录 / 分片数），设置页热生效。
 //
 // 只影响之后新建的任务：dir 与 split 都是 aria2 的**每任务**选项，已在
 // 下载的任务改不了（aria2 没有"把这个进行中的任务挪到别的目录"这种操作）。
 // 界面上要说清"对进行中的任务无效"，不能让用户以为改了所有任务就搬家了。
+// Defaults 返回当前的面板默认目录与分片数（读侧，见 SetDefaults）。
+func (s *Service) Defaults() (string, int) {
+	d := s.addDefaults.Load()
+	return d.dir, d.split
+}
+
 func (s *Service) SetDefaults(dir string, split int) {
 	if split < 0 {
 		split = 0

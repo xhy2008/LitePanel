@@ -88,6 +88,9 @@ func main() {
 	attachTerminalDeps(&deps, db, tw)
 	defer tw.Bridge.Close()
 
+	// 设置：接进路由依赖，并在启动时把库里的值推给各子系统（见 wireSettings）。
+	wireSettings(&deps, db, cfg, col, sup)
+
 	sub, err := webdist.Dist()
 	if err != nil {
 		fatal("前端产物不可用: %v", err)

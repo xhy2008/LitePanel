@@ -151,6 +151,16 @@ func (s *Supervisor) SetGrace(d time.Duration) {
 	s.mu.Unlock()
 }
 
+// LogLimit 返回当前日志行数上限（读侧与 SetLogLimit 对称，供测试与状态导出用）。
+func (s *Supervisor) LogLimit() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.limit <= 0 {
+		return DefaultLogLines
+	}
+	return s.limit
+}
+
 // SetLogLimit 改后续新建服务的日志行数上限。
 func (s *Supervisor) SetLogLimit(n int) {
 	if n > 0 {
