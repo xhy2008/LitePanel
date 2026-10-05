@@ -72,6 +72,31 @@ func (l *LoginLimiter) Fail(ip string) {
 	}
 }
 
+// SetPolicy 热改锁定阈值与窗口（设置页）。
+//
+// 读 maxFails/window 的几处（Allowed/Fail/Prune）都已经持 l.mu，所以这里
+// 直接在同一把锁下改即可，不需要额外的原子类型。
+//
+// 非法值回落到构造时的默认而不是拒绝：这个值来自库里可能留下的旧数字，
+// 而"锁定阈值被设成 0 = 任何人都能无限次试密码"是安全问题，绝不能因为
+// 库里一个坏数字就放行；同样窗口也不能是 0。与 NewLoginLimiter 的兜底一致。
+//
+// 注意：改阈值**不会**清掉已有的失败计数。已经处于锁定中的 IP 仍按它当初
+// 被锁时算出的 lockedU 到期——把窗口调小就立刻解锁所有正在被爆破的 IP，
+// 是这条设置最不想要的副作用。
+func (l *LoginLimiter) SetPolicy(maxFails int, window time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if maxFails < 1 {
+		maxFails = 5
+	}
+	if window <= 0 {
+		window = 10 * time.Minute
+	}
+	l.maxFails = maxFails
+	l.window = window
+}
+
 // Reset 在登录成功后清零该 IP 的计数。
 func (l *LoginLimiter) Reset(ip string) {
 	l.mu.Lock()
