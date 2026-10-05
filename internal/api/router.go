@@ -71,6 +71,15 @@ type AuthDeps struct {
 	// 码会把用户支到完全错误的方向 —— 他会去 apt install aria2，而面板根本没
 	// 往里接。
 	Downloads Downloads
+
+	// Settings 为 nil 时设置接口返回 501（与 Services/Files 同一取舍：
+	// 200 + 空列表会被前端渲染成"这台机器一个设置项都没有"，而真相是面板
+	// 没接这个模块 —— 两者要用户做的事完全不同）。
+	Settings SettingsStore
+	// SettingsApply 在设置写库成功后把新值推给各子系统热生效（装配层实现）。
+	// 它是"设置只存不读"的唯一防线：不接的话保存永远只落库，界面上却显示
+	// 已保存 —— 那是本项目明令禁止的失效模式，所以装配层测试必须证明它被接。
+	SettingsApply SettingsApply
 }
 
 // NewRouter 返回面板根路由。static 为 nil 时不挂载前端（便于 API 测试）；
@@ -180,6 +189,12 @@ func NewRouter(static fs.FS, deps AuthDeps) chi.Router {
 		// 下载（设计 751–760）。aria2 的 RPC 地址与密钥由 M7-T5 的设置热重载
 		// 提供，这里只依赖注入进来的实例；未注入时整套端点 501（见 AuthDeps
 		// 的字段注释：为什么不是 503）。
+		if deps.Settings != nil {
+			a.Get("/settings", authed(handleSettingsGet(deps.Settings)))
+			a.Put("/settings", authed(handleSettingsPut(deps.Settings, deps.SettingsApply)))
+		}
+		// 吊销全部会话只依赖 Sessions（上面已确保非 nil），不依附设置模块。
+		a.Post("/sessions/revoke-all", authed(handleRevokeAllSessions(deps)))
 		if deps.Downloads != nil {
 			dl := deps.Downloads
 			a.Get("/dl/health", authed(handleDLHealth(dl)))
