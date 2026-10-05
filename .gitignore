@@ -1,20 +1,18 @@
+# 构建产物
 /bin/
+/litepanel
 web/node_modules/
 web/coverage/
+*.test
+
+# 数据库文件（任何位置）
 *.db
 *.db-wal
 *.db-shm
 
-# 本机开发用配置与数据，不进仓库
+# 本机开发：配置、数据、探针与脚本，全目录不进仓库
 /config.toml
 /dev/
-.scratch/
 
-# 工具编译产物
-/d6probe
-/tools/d6probe/d6probe
-/asmprobe
-/logx.test
-*.test
-/litepanel
-dev/
+# 杂项
+.scratch/
