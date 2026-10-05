@@ -66,6 +66,11 @@ type settingItem struct {
 	// HasValue 是密钥项唯一能暴露的事实：设过没有。前端据此显示
 	// "已设置（留空则不修改）"，而不是把空输入框渲染成"没设过"。
 	HasValue bool `json:"has_value,omitempty"`
+	// RestartRequired：改完必须重启面板才生效，前端据此打标记。
+	// 不标的话界面会显示“已保存”而值一个字节都没生效——那正是本项目对
+	// 设置项定义的最坏失效模式。有了它，“这个改动要重启”至少是如实告知，
+	// 而不是让用户自己踩。
+	RestartRequired bool `json:"restart_required,omitempty"`
 }
 
 // settingGroup 是 GET 响应里的一个分组（前端据此渲染锚点导航）。
@@ -98,19 +103,20 @@ func secretKeys() map[settings.Key]bool {
 
 func toItem(v settings.Value) settingItem {
 	it := settingItem{
-		Key:        string(v.Key),
-		Group:      v.Group,
-		Kind:       string(v.Kind),
-		Label:      v.Label,
-		Unit:       v.Unit,
-		Min:        v.Min,
-		Max:        v.Max,
-		Enum:       v.Enum,
-		Set:        v.Set,
-		Overridden: v.Overridden,
-		Secret:     v.Secret,
-		Required:   requiredKeys()[v.Key],
-		Valid:      true,
+		Key:             string(v.Key),
+		Group:           v.Group,
+		Kind:            string(v.Kind),
+		Label:           v.Label,
+		Unit:            v.Unit,
+		Min:             v.Min,
+		Max:             v.Max,
+		Enum:            v.Enum,
+		Set:             v.Set,
+		Overridden:      v.Overridden,
+		Secret:          v.Secret,
+		RestartRequired: v.RestartRequired,
+		Required:        requiredKeys()[v.Key],
+		Valid:           true,
 	}
 	if v.Secret {
 		// 只暴露"设过没有"，值本身一律不发。
