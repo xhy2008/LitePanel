@@ -3,6 +3,7 @@ package filemgr
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"litepanel/internal/metrics"
@@ -25,9 +26,14 @@ type Service struct {
 	procDir string
 	// db 是 fs_jobs 的落库位置（见 Options.DB）。
 	db *store.DB
-	// jobConcurrency / executor 见 Options 同名项。
-	jobConcurrency int
-	executor       jobExecutor
+	// jobDesired 是期望的后台任务并发上限（设置页可热改，见 SetJobConcurrency）。
+	// jobLive 是真实存活的 worker 数。两者分开才能表达"调低了但还在收尾"：
+	// 只存一个数字的话，"改了并发数"与"池子里真的只剩那么多个"会被混为一谈，
+	// 而前者是意图、后者是事实。
+	jobDesired atomic.Int32
+	jobLive    atomic.Int32
+	// executor 见 Options 同名项。
+	executor jobExecutor
 	// progressObserver 是进度落库次数的钩子（只有测试用）。节流是这条
 	// 路径上唯一的性能护栏，而它的效果不能用"过了多久"断言（墙钟在负载
 	// 高的机器上会漂），只能数次数。
@@ -69,10 +75,15 @@ type Service struct {
 	// clock 注入时间（TTL 判定用）。
 	clock func() time.Time
 
-	// trashDirName 是各盘根目录下的回收站目录名。
-	trashDirName string
-	// trashRetain 是回收站条目保留期（CleanTrash 用）。
-	trashRetain time.Duration
+	// trashDirName / trashRetain 用 atomic.Pointer 而不是裸字段：设置页会
+	// 在运行中改它们（SetTrashPolicy），而读取方散在 Delete/ListTrash/
+	// CleanTrash/EmptyTrash 各处，其中有在 goroutine 里跑的。裸字段是数据
+	// 竞争，而本机 -race 不可用（Termux 上跑不了），测不出来只能靠结构保证。
+	// 用 Pointer 而不是 atomic.String：读到的永远是"某一次完整写入"，
+	// 不会出现名字读到新的、保留期读到旧的这种半更新。
+	trashPolicy atomic.Pointer[trashPolicy]
+	// trashMigrateMu 串行化"改名时把旧目录搬到新名"的动作（见 SetTrashPolicy）。
+	trashMigrateMu sync.Mutex
 	// fsRoot 查"路径属于哪个文件系统锚点"（见 Options.FilesystemRoot）。
 	fsRoot rootFunc
 	// trashRoots 枚举要管哪些盘（见 Options.TrashRoots）。
@@ -187,6 +198,11 @@ func NewService(opts Options) *Service {
 	if concurrency <= 0 {
 		concurrency = DefaultJobConcurrency
 	}
+	// 装配期也夹上界：config 那层会拒越界值，但 NewService 也接受测试与
+	// 热重载直接传入的数字（与保留期同样的"两处职责不同"）。
+	if concurrency > maxJobConcurrency {
+		concurrency = maxJobConcurrency
+	}
 	wakeInterval := opts.JobWakeInterval
 	if wakeInterval <= 0 {
 		wakeInterval = defaultJobWakeInterval
@@ -209,11 +225,10 @@ func NewService(opts Options) *Service {
 	}
 	svc := &Service{
 		procDir: dir, db: opts.DB, usage: usage,
-		jobConcurrency: concurrency, wakeInterval: wakeInterval,
-		wake: make(chan struct{}, 1), runningCancel: map[int64]context.CancelFunc{},
+		wakeInterval: wakeInterval,
+		wake:         make(chan struct{}, 1), runningCancel: map[int64]context.CancelFunc{},
 		uploadRoot: opts.UploadRoot, uploadTTL: ttl,
 		maxChunk: maxChunk, maxUpload: maxUpload, clock: clock,
-		trashDirName: trashName, trashRetain: retain,
 		fsRoot: rootFinder(opts.FilesystemRoot),
 		sameFS: sameFSFinder(opts.SameFS),
 	}
@@ -233,17 +248,35 @@ func NewService(opts Options) *Service {
 	} else {
 		svc.trashRoots = svc.discoverTrashRoots
 	}
+	svc.jobDesired.Store(int32(concurrency))
+	svc.trashPolicy.Store(&trashPolicy{dirName: trashName, retain: retain})
 	return svc
+}
+
+// trashPolicy 是回收站的两项运行期可调参数（见 Service.trashPolicy）。
+type trashPolicy struct {
+	dirName string
+	retain  time.Duration
+}
+
+// trash 读当前策略。返回值永远非 nil：atomic.Pointer 的零值是 nil，而读取
+// 方散在 Delete/ListTrash/CleanTrash 各处 —— 让每个读取方各自判 nil 是
+// "忘了判的那一处 panic"，在这里判一次即可。
+func (s *Service) trash() trashPolicy {
+	if p := s.trashPolicy.Load(); p != nil {
+		return *p
+	}
+	return trashPolicy{dirName: DefaultTrashDirName, retain: DefaultTrashRetain}
 }
 
 // UploadRoot 暴露暂存根，供装配层与测试确认接的是哪一个目录。
 func (s *Service) UploadRoot() string { return s.uploadRoot }
 
 // TrashDirName 暴露回收站目录名，供装配层与测试确认配置接上了没有。
-func (s *Service) TrashDirName() string { return s.trashDirName }
+func (s *Service) TrashDirName() string { return s.trash().dirName }
 
 // TrashRetain 暴露保留期（已经过夹取），理由同上。
-func (s *Service) TrashRetain() time.Duration { return s.trashRetain }
+func (s *Service) TrashRetain() time.Duration { return s.trash().retain }
 
 // diskUsage 是容量快照的本地别名 —— 不直接把 metrics.Usage 暴露成
 // JSON 契约类型：那会让 api 层的响应格式取决于 metrics 包的字段名，
@@ -273,4 +306,4 @@ func (s *Service) List(ctx context.Context, dir string, opts ListOptions) (ListP
 // 的情况下**没有任何外部可观察面**：漏传会被默认值悄悄夹住，不报错、不改行为,
 // 只让配置变成摆设。有了它，装配测试可以钉住传参本身，而不是靠"任务看起来
 // 有没有变快"（并发从 2 到 4 在机械盘上肉眼不可分辨）。
-func (s *Service) JobConcurrency() int { return s.jobConcurrency }
+func (s *Service) JobConcurrency() int { return int(s.jobDesired.Load()) }

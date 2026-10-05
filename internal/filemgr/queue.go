@@ -27,6 +27,12 @@ import (
 // 复制"会一口气起 500 个 goroutine 各开一对文件句柄。
 const DefaultJobConcurrency = 2
 
+// maxJobConcurrency 是并发上限的上界。与 config.Validate 里 job_concurrency
+// 的 1–16 是同一个数字（两处必须一致，否则"配置文件拒的值设置页接受"）。
+// 16 不是性能拐点（这台机器是 HDD，2–4 之后磁头互相打断），它是"每个
+// worker 各握着一块 1MB 缓冲和若干 fd"的资源上界。
+const maxJobConcurrency = 16
+
 const (
 	// defaultJobWakeInterval 是没有唤醒信号时的兜底轮询周期。
 	//
@@ -89,7 +95,14 @@ func (s *Service) StartJobs(ctx context.Context) bool {
 		// 以为一堆任务出了问题，而实际只是删历史。
 		logx.Info("任务对账：%d 条上次遗留的任务已标记或清除", n)
 	}
-	for i := 0; i < s.jobConcurrency; i++ {
+	// 按期望值起 worker，并把 jobLive 一起抬起来（exitIfSurplus 靠它判断
+	// 是否超编，漏了这一步会让所有 worker 在第一轮检查点自我退出）。
+	desired := int(s.jobDesired.Load())
+	if desired < 1 {
+		desired = 1
+	}
+	for i := 0; i < desired; i++ {
+		s.jobLive.Add(1)
 		s.jobsWG.Add(1)
 		go s.jobWorker(ctx)
 	}
@@ -143,14 +156,17 @@ func (s *Service) jobWorker(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// 每一轮开头（此刻一定**没有**持有任务）检查是否超编。
+		// 检查点必须在"未持有任务"处：在跑任务的途中把 worker 拆掉，
+		// 就等于把一条正在复制的任务变成没人收尾的 running。
+		if s.exitIfSurplus() {
+			return
+		}
 		j, err := s.claimJob(ctx)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			// 没有待办：等活来、兜底 tick、或关停。
-			select {
-			case <-s.wake:
-			case <-tick.C:
-			case <-ctx.Done():
+			if !s.waitForWork(ctx, tick) {
 				return
 			}
 			continue
@@ -158,10 +174,7 @@ func (s *Service) jobWorker(ctx context.Context) {
 			// 领取失败（多半是库暂时不可用）。不能当"没有活"悄悄跳过：
 			// 那会让 worker 安静地停在轮询上，而库里其实堆着一排 pending。
 			logx.Error("领取任务失败: %v", err)
-			select {
-			case <-s.wake:
-			case <-tick.C:
-			case <-ctx.Done():
+			if !s.waitForWork(ctx, tick) {
 				return
 			}
 			continue
@@ -372,3 +385,89 @@ func (t *throttler) writeForce() error {
 }
 
 // runJob 是内置执行器（按 op 分派到 copy/move/delete），定义在 exec_run.go。
+
+// waitForWork 等一次唤醒 / 兜底 tick / 关停。返回 false 表示该退出了。
+//
+// 从 s.wake 醒来时也要查一次超编：调低并发后空闲 worker 全阻塞在这里，
+// 只在循环开头查的话它们要等一整个兜底周期才动（生产是 30s）。
+//
+// 这里**没有**"退出前把唤醒信号补投一次"：一度以为需要（怕超编 worker 吃掉
+// wake 之后那批 pending 没人认领），但用"调低并发后立刻提交单条任务"跑了
+// 60 轮竞态对照，有无补投行为完全一致 —— 提交时那发 kick 被谁吃掉并不重要，
+// 留下的 worker 是靠 claimJob 查库拿到任务的，不是靠那条信号。留着它等于
+// 在代码里供奉一个没人能证明的因果。
+func (s *Service) waitForWork(ctx context.Context, tick *time.Ticker) bool {
+	select {
+	case <-s.wake:
+		if s.exitIfSurplus() {
+			s.kick()
+			return false
+		}
+		return true
+	case <-tick.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// exitIfSurplus 在"当前存活 worker 数已超过期望值"时把本 worker 注销并
+// 返回 true。调用点必须处在没有持有任务的位置（见 jobWorker 的检查点）。
+func (s *Service) exitIfSurplus() bool {
+	for {
+		live := s.jobLive.Load()
+		want := s.jobDesired.Load()
+		if live <= want {
+			return false
+		}
+		// CAS 而不是直接 Add(-1)：多个 worker 可能同时发现超编，CAS 保证
+		// 只减掉"确实超出的那一部分"，不会把存活数减到期望值以下。
+		if s.jobLive.CompareAndSwap(live, live-1) {
+			return true
+		}
+	}
+}
+
+// JobDesired 返回当前的期望并发数（设置页改的就是它）。
+func (s *Service) JobDesired() int { return int(s.jobDesired.Load()) }
+
+// JobLive 返回当前存活的 worker 数。导出给装配层测试："改了并发数之后
+// 池子里确实只剩那么多"必须能从外部观察到。
+func (s *Service) JobLive() int { return int(s.jobLive.Load()) }
+
+// SetJobConcurrency 热改后台任务并发上限（设置页）。
+//
+// 三条不显然的规则：
+//   - **调高**立刻补 spawn worker（前提是池已启动）。只改数字不补人的话，
+//     "并发 2 → 8"要等下次重启才生效，而用户改完就会连着提交一批任务来验证。
+//   - **调低**不杀任何在跑的任务：worker 只在取任务的检查点自行退出。
+//     强行取消正在复制的目录是不可逆的半成品，而用户要的只是"以后别同时跑
+//     这么多"。
+//   - 池没启动时只记期望值：StartJobs 会按它起（否则"没起 WS/没接库"的
+//     场合改设置会把并发数改掉而根本没有 worker）。
+//
+// 越界值夹到 [1,16] 而不是报错：与 NewService 同样的理由 —— 这里可能拿到
+// 库里留下的坏数字，让队列停摆比按边界跑糟得多。设置页那层有区间校验，
+// 用户改得回来。
+func (s *Service) SetJobConcurrency(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > maxJobConcurrency {
+		n = maxJobConcurrency
+	}
+	s.jobDesired.Store(int32(n))
+
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
+	if !s.poolStarted {
+		return
+	}
+	// 先补编再唤醒：反过来的话补上的 worker 会错过这次唤醒（它们还没起）。
+	for s.jobLive.Load() < int32(n) {
+		s.jobLive.Add(1)
+		s.jobsWG.Add(1)
+		go s.jobWorker(s.jobsCtx)
+	}
+	s.kick()
+}

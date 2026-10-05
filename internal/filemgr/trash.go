@@ -265,7 +265,7 @@ func (s *Service) discoverTrashRoots(ctx context.Context) ([]string, error) {
 
 // trashRoot 拼出某个盘的回收站目录。
 func (s *Service) trashRoot(mount string) string {
-	return filepath.Join(mount, s.trashDirName)
+	return filepath.Join(mount, s.trash().dirName)
 }
 
 // ensureTrashDir 建出（或确认存在）某个盘的回收站目录。
@@ -282,7 +282,7 @@ func (s *Service) ensureTrashDir(ctx context.Context, mount string) (string, err
 	if err := os.MkdirAll(dir, trashDirPerm); err != nil {
 		// MkdirAll 的 *PathError 里带着 EACCES/EROFS，包一层就够定位。
 		return "", fmt.Errorf("%w: %s 建 %s 失败（%v）；这个盘上的文件只能永久删除，或用 SFTP 移走",
-			ErrTrashUnwritable, mount, s.trashDirName, err)
+			ErrTrashUnwritable, mount, s.trash().dirName, err)
 	}
 	// 再显式 chmod 一次：MkdirAll 的 mode 还要被进程 umask 削一道，而
 	// umask 取决于面板是被 systemd 拉起还是从一个 shell 里手起的 ——
@@ -290,7 +290,7 @@ func (s *Service) ensureTrashDir(ctx context.Context, mount string) (string, err
 	// 已存在的 .trash 也一并收紧（可能是老版本或用户自己建的 0755）。
 	if err := os.Chmod(dir, trashDirPerm); err != nil {
 		return "", fmt.Errorf("%w: %s 收紧 %s 权限失败（%v）",
-			ErrTrashUnwritable, mount, s.trashDirName, err)
+			ErrTrashUnwritable, mount, s.trash().dirName, err)
 	}
 	return dir, nil
 }
@@ -669,7 +669,7 @@ func (s *Service) EmptyTrash(ctx context.Context) (int, error) {
 // 第三次打开回收站时消失，而他会坚持说昨天看还在 —— 这类"差一个等号"
 // 的差别在真实使用中无法与 bug 区分，所以它需要一条测试钉住方向。
 func (s *Service) CleanTrash(ctx context.Context) (int, error) {
-	cutoff := s.clock().Add(-s.trashRetain).Unix()
+	cutoff := s.clock().Add(-s.trash().retain).Unix()
 	return s.dropEntries(ctx, func(e entryRef) bool { return e.item.DeletedAt < cutoff })
 }
 
@@ -914,7 +914,7 @@ func (s *Service) trashWritable(mount string) error {
 	}
 	if err := unix.Access(target, unix.W_OK); err != nil {
 		return fmt.Errorf("%w: %s 这个盘写不进回收站（%s，%v）；这个盘上的文件只能永久删除，或用 SFTP 移走",
-			ErrTrashUnwritable, mount, s.trashDirName, err)
+			ErrTrashUnwritable, mount, s.trash().dirName, err)
 	}
 	return nil
 }
@@ -936,4 +936,146 @@ func (s *Service) trashedOrigins(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// SetTrashPolicy 热改回收站的目录名与保留期（设置页，M7-T5）。
+//
+// 返回搬到新目录的条目数。改名不是"存个字符串"就完事的事：列举与清理都
+// 按 <盘根>/<新名>/ 遍历，所以旧目录里的条目会**同时**失去三个出口 ——
+// 界面上看不到、清理任务不会再碰、"立即清空回收站"也扫不到它。对一台管着
+// 用户文件的面板来说那就是"删掉的文件不见了"，而且是静默的。
+//
+// 所以这里做的是**尽量搬家**而不是要求用户自己挪：
+//   - 新目录不存在时整目录 rename（一次 syscall，条目 ID 与 meta 一起走）；
+//   - 新目录已存在（用户之前用过这个名字）则逐个条目 rename，同盘所以
+//     不会退化成复制；
+//   - 任一步失败就**只搬成功的部分**，并把失败记进日志。搬不动时旧目录
+//     原封不动留在盘上，用户能自己看见 —— 比"改名成功、条目蒸发了"好。
+//
+// 保留期的新值对**已存在**的条目立刻生效（CleanTrash 每次都用当前值算
+// cutoff）：这是用户期望的方向（调到 1 天就是想快点清掉），不是 bug。
+func (s *Service) SetTrashPolicy(ctx context.Context, dirName string, retain time.Duration) (int, error) {
+	name := strings.TrimSpace(dirName)
+	if name == "" {
+		return 0, fmt.Errorf("回收站目录名不能为空")
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return 0, fmt.Errorf("回收站目录名必须是单个目录名（如 .trash），不能是路径：%q", dirName)
+	}
+	if retain < minTrashRetain {
+		retain = minTrashRetain
+	}
+	if retain > maxTrashRetain {
+		retain = maxTrashRetain
+	}
+	old := s.trash()
+	// 先把策略换掉再搬目录：反过来会让搬迁期间的删除请求仍写进旧目录，
+	// 那些条目搬完之后又出现在旧目录里，比不搬更难解释。
+	s.trashPolicy.Store(&trashPolicy{dirName: name, retain: retain})
+	if old.dirName == name {
+		return 0, nil
+	}
+	return s.migrateTrashDirs(old.dirName, name)
+}
+
+// migrateTrashDirs 把各盘旧回收站目录里的条目搬到新名下。
+func (s *Service) migrateTrashDirs(from, to string) (int, error) {
+	s.trashMigrateMu.Lock()
+	defer s.trashMigrateMu.Unlock()
+	roots, err := s.trashRoots(context.Background())
+	if err != nil {
+		// 枚举不到盘就什么都没搬。策略已经改了，所以这里必须把错误交回
+		// 上层：设置页要告诉用户"已改名，但旧目录没搬动"。
+		return 0, fmt.Errorf("枚举磁盘失败，回收站旧目录未搬迁: %w", err)
+	}
+	moved := 0
+	var fail []string
+	for _, mount := range roots {
+		oldDir := filepath.Join(mount, from)
+		st, err := os.Lstat(oldDir)
+		if err != nil || !st.IsDir() {
+			continue // 这个盘没有旧回收站，正常
+		}
+		newDir := filepath.Join(mount, to)
+		if _, err := os.Lstat(newDir); errors.Is(err, os.ErrNotExist) {
+			// 新名还没被用过：整目录改名，条目和 meta 一定成对跟着走。
+			if err := os.Rename(oldDir, newDir); err != nil {
+				fail = append(fail, mount)
+				continue
+			}
+			n, _ := countTrashEntries(newDir)
+			moved += n
+			continue
+		} else if err != nil {
+			fail = append(fail, mount)
+			continue
+		}
+		// 两边都在：逐条目搬。同盘 rename，绝不复制（跨盘复制是设计里
+		// 明令禁止的那条路）。
+		n, err := s.moveTrashEntries(oldDir, newDir)
+		moved += n
+		if err != nil {
+			fail = append(fail, mount)
+		}
+	}
+	if len(fail) > 0 {
+		return moved, fmt.Errorf("以下磁盘的回收站旧目录没能搬完，请手动检查 %s：%s",
+			from, strings.Join(fail, ", "))
+	}
+	return moved, nil
+}
+
+// moveTrashEntries 把 oldDir 里的条目（载荷 + 同名 .meta.json）逐个搬到
+// newDir。返回搬走的条目数。
+func (s *Service) moveTrashEntries(oldDir, newDir string) (int, error) {
+	des, err := os.ReadDir(oldDir)
+	if err != nil {
+		return 0, err
+	}
+	moved := 0
+	var firstErr error
+	for _, de := range des {
+		name := de.Name()
+		if strings.HasSuffix(name, metaSuffix) {
+			continue // meta 跟着载荷一起搬
+		}
+		meta := filepath.Join(oldDir, name+metaSuffix)
+		if _, err := os.Lstat(meta); err != nil {
+			// 没有 meta 的文件不是面板放的条目（可能是用户自己在这个目录里
+			// 建的东西）。**不搬、不删**：按回收站规则处理它会误删用户的文件。
+			continue
+		}
+		if err := os.Rename(filepath.Join(oldDir, name), filepath.Join(newDir, name)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := os.Rename(meta, filepath.Join(newDir, name+metaSuffix)); err != nil {
+			// 载荷已搬走而 meta 落在旧目录：这条目在新目录里"不被承认"
+			// （认条目靠的是旁边有 meta）。把它退回新目录旁边，保证成对。
+			_ = os.Rename(filepath.Join(oldDir, name+metaSuffix), filepath.Join(newDir, name+metaSuffix))
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		moved++
+	}
+	return moved, firstErr
+}
+
+// countTrashEntries 数目录里有多少个回收站条目（按 meta 计数）。
+func countTrashEntries(dir string) (int, error) {
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, de := range des {
+		if strings.HasSuffix(de.Name(), metaSuffix) {
+			n++
+		}
+	}
+	return n, nil
 }

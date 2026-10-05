@@ -41,6 +41,7 @@ func newBlockingExec() *blockingExec {
 
 func (b *blockingExec) exec(ctx context.Context, j Job, report func(int64, int) error) error {
 	b.mu.Lock()
+	gate := b.gate // 取快照：reset 之后进来的任务用新 gate，本任务用进来时那个
 	b.entering++
 	b.entered = append(b.entered, j.ID)
 	if b.entering > b.maxSeen {
@@ -53,7 +54,7 @@ func (b *blockingExec) exec(ctx context.Context, j Job, report func(int64, int) 
 		b.mu.Unlock()
 	}()
 	select {
-	case <-b.gate:
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -73,6 +74,17 @@ func (b *blockingExec) count() int {
 }
 
 func (b *blockingExec) release() { b.once.Do(func() { close(b.gate) }) }
+
+// reset 清掉计数并把 gate 换成新的，好让同一套夹具分阶段用：
+// 先放行一批任务让 worker 进入空闲阻塞，再重新卡住下一批。
+func (b *blockingExec) reset() {
+	b.mu.Lock()
+	b.entered = nil
+	b.maxSeen = 0
+	b.once = sync.Once{}
+	b.gate = make(chan struct{})
+	b.mu.Unlock()
+}
 
 // poolEnv 在 jobEnv 之上接一个可注入执行器的池。
 type poolEnv struct {
