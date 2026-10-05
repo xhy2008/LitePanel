@@ -230,7 +230,27 @@ func (c *Client) AddURI(ctx context.Context, uris []string, o Options) (string, 
 	return gid, nil
 }
 
-// Status 是 aria2.tellStatus 的返回（字段名照 aria2 的 key）。
+// ChangeGlobalOption 改 aria2 的全局默认（max-concurrent-downloads、split、
+// dir 等）。设置页里"下载"分组的热生效走这里。
+//
+// 实测（aria2c 1.37.0，见 dev/aria2opt）：changeGlobalOption 对
+// max-concurrent-downloads / dir / split / max-connection-per-server /
+// min-split-size 都返回 OK，且之后**新建**任务的 getOption 能看到新值。
+// 关键限制：它只影响改完之后新加的任务，已经在下的任务不受影响 —— 这是
+// aria2 的语义，面板只能在界面上说明"对进行中的任务无效"，不能假装能改。
+//
+// 空 map 直接返回不调用：aria2 对空 options 也回 OK，但那是无意义的一次
+// 往返；调用方（装配层）常常只有部分项要推。
+func (c *Client) ChangeGlobalOption(ctx context.Context, opts map[string]string) error {
+	if len(opts) == 0 {
+		return nil
+	}
+	// aria2 的 options 值一律是字符串（数字也要写成 "5"），与 addUri 同一
+	// 套规则；转换发生在调用方（那里本来就是 int/字符串混合的设置值）。
+	return c.callWithAuth(ctx, "aria2.changeGlobalOption", []any{opts}, nil)
+}
+
+// // Status 是 aria2.tellStatus 的返回（字段名照 aria2 的 key）。
 type Status struct {
 	GID             string   `json:"gid"`
 	Status          string   `json:"status"`

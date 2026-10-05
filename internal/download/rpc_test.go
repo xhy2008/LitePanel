@@ -219,3 +219,66 @@ func TestUnavailableClientFailsEveryMethod(t *testing.T) {
 		t.Errorf("原始原因要能透出来: %v", err)
 	}
 }
+
+// changeGlobalOption 是设置页"下载"分组的热生效通道。
+//
+// 参数形状必须是 [token, options]：aria2 对 params 的个数与顺序都敏感，
+// 而它的报错只有 -32602 "Invalid params"，看不出是哪个位置错了。
+func TestChangeGlobalOptionShape(t *testing.T) {
+	c, rec := newTestClient(t, func(m string, p []any) any { return "OK" }, "sec")
+	err := c.ChangeGlobalOption(context.Background(), map[string]string{
+		"max-concurrent-downloads": "7",
+		"split":                    "9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := rec.last()
+	if req.Method != "aria2.changeGlobalOption" {
+		t.Errorf("method 拼写不对: %q", req.Method)
+	}
+	if len(req.Params) != 2 {
+		t.Fatalf("params 应是 [token, options]，得 %d 个", len(req.Params))
+	}
+	if tok, _ := req.Params[0].(string); tok != "token:sec" {
+		t.Errorf("密钥位置不对: %#v", req.Params[0])
+	}
+	opts, ok := req.Params[1].(map[string]any)
+	if !ok {
+		t.Fatalf("options 应是对象，得 %#v", req.Params[1])
+	}
+	if opts["max-concurrent-downloads"] != "7" || opts["split"] != "9" {
+		t.Errorf("选项没原样发出: %#v", opts)
+	}
+}
+
+// 空 map 不发请求。
+// 装配层常常只有部分项要推（用户这次只改了回收站天数），为一次空推送
+// 走一趟 RPC 没有意义，而且 aria2 不可达时会凭空冒出一个错误。
+func TestChangeGlobalOptionEmptyIsNoop(t *testing.T) {
+	var hits int
+	c, _ := newTestClient(t, func(m string, p []any) any { hits++; return "OK" }, "sec")
+	if err := c.ChangeGlobalOption(context.Background(), map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ChangeGlobalOption(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Errorf("空选项不该发请求，发了 %d 次", hits)
+	}
+}
+
+// 无密钥时 params 只有 options（不能塞一个空的 "token:"）。
+// aria2 在未配 rpc-secret 时会把 params[0] 当 gid 去解析，回一个
+// "Invalid GID" 而不是"不需要密钥"。
+func TestChangeGlobalOptionWithoutSecret(t *testing.T) {
+	c, rec := newTestClient(t, func(m string, p []any) any { return "OK" }, "")
+	if err := c.ChangeGlobalOption(context.Background(), map[string]string{"split": "4"}); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := rec.last()
+	if len(req.Params) != 1 {
+		t.Fatalf("无密钥时 params 应只有 options，得 %d 个: %#v", len(req.Params), req.Params)
+	}
+}

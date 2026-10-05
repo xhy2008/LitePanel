@@ -213,9 +213,9 @@ func handleServicesDelete(deps AuthDeps) http.HandlerFunc {
 		}
 		if st, err := service.GetState(deps.DB, id); err == nil &&
 			(st.State == service.StateRunning || st.State == service.StateStarting) {
-			ctx, cancel := context.WithTimeout(r.Context(), service.DefaultGrace+8*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), deps.Services.Grace()+8*time.Second)
 			defer cancel()
-			if _, err := deps.Services.Stop(ctx, svc, service.DefaultGrace); err != nil &&
+			if _, err := deps.Services.Stop(ctx, svc, 0); err != nil &&
 				!errors.Is(err, service.ErrNotRunning) {
 				writeError(w, http.StatusInternalServerError, "internal", "停止服务失败: "+err.Error())
 				return
@@ -249,11 +249,11 @@ func handleServiceToggle(deps AuthDeps) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), service.DefaultGrace+10*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), deps.Services.Grace()+10*time.Second)
 		defer cancel()
 
 		if st.State == service.StateRunning || st.State == service.StateStarting {
-			out, err := deps.Services.Stop(ctx, svc, service.DefaultGrace)
+			out, err := deps.Services.Stop(ctx, svc, 0)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "停止失败: "+err.Error())
 				return

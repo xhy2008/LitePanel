@@ -59,6 +59,11 @@ type Supervisor struct {
 	// 没说进程一退出就要忘掉 —— 崩溃后点开日志恰恰是最重要的用途。
 	last  map[int64]*LogBuf
 	limit int
+	// grace 是默认的停止宽限期（设置页可热改，见 SetGrace）。
+	// 用 mu 保护而不是原子类型：读它的地方（terminate）本来就持 mu 之外的
+	// 独立路径，而写它只有设置页那一处；加一把专用锁反而看不出与 limit 的
+	// 对称性 —— 两者是同一类"运行期可调参数"。
+	grace time.Duration
 
 	// onEvent / onLog 由 API 层挂 WS 广播。放这里而不是让 handler 自己发，
 	// 是因为状态变化大部分来自 watcher（服务自己崩了），handler 根本不在场。
@@ -119,7 +124,31 @@ func (s *Supervisor) logSink(id int64, lines []string) {
 
 // NewSupervisor 建监管器。
 func NewSupervisor(db *store.DB) *Supervisor {
-	return &Supervisor{db: db, procs: map[int64]*proc{}, last: map[int64]*LogBuf{}, limit: DefaultLogLines}
+	return &Supervisor{db: db, procs: map[int64]*proc{}, last: map[int64]*LogBuf{},
+		limit: DefaultLogLines, grace: DefaultGrace}
+}
+
+// Grace 返回当前默认停止宽限期（非正值回落到 DefaultGrace，与 terminate
+// 里原本的语义一致：调用方给 0 表示"你决定"）。
+func (s *Supervisor) Grace() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.grace <= 0 {
+		return DefaultGrace
+	}
+	return s.grace
+}
+
+// SetGrace 热改默认停止宽限期（设置页）。
+// 非正值按"没设置"处理而不是拒绝：这个值来自库里可能留下的坏数字，
+// 一次 SIGKILL 提前到 0 秒会把还在写盘的服务打断，代价远大于"按默认跑"。
+func (s *Supervisor) SetGrace(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.mu.Lock()
+	s.grace = d
+	s.mu.Unlock()
 }
 
 // SetLogLimit 改后续新建服务的日志行数上限。
@@ -256,8 +285,10 @@ func (s *Supervisor) Stop(ctx context.Context, svc Service, grace time.Duration)
 
 // terminate 是 Stop 与 Shutdown 共用的关停流程。
 func (s *Supervisor) terminate(ctx context.Context, svc Service, p *proc, grace time.Duration) (State, error) {
+	// 0 = "用面板当前的默认宽限期"（设置页改的就是它）。调用点不再各自
+	// 写死 DefaultGrace：那会让设置页上的"停止宽限时长"变成只存不读的数字。
 	if grace <= 0 {
-		grace = DefaultGrace
+		grace = s.Grace()
 	}
 	if ctx == nil {
 		ctx = context.Background()

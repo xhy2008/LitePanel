@@ -17,6 +17,10 @@ import (
 type ServiceSupervisor interface {
 	Start(svc service.Service) (service.State, error)
 	Stop(ctx context.Context, svc service.Service, grace time.Duration) (service.State, error)
+	// Grace 是当前默认停止宽限期。handler 用它给整个请求定时，并在调用
+	// Stop 时传 0 表示"用面板当前设置"——不这样接的话，设置页上的
+	// "停止宽限时长"就只是个存进库没人读的数字。
+	Grace() time.Duration
 	Log(id int64) *service.LogBuf
 	OnEvent(func(service.Event))
 	OnLog(func(id int64, lines []string))
