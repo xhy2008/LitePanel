@@ -56,6 +56,56 @@ type Collector struct {
 	liveLoops atomic.Int64
 }
 
+// currentInterval 在锁内读间隔，供 loop 建 ticker 用。
+func (c *Collector) currentInterval() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interval
+}
+
+// Interval 返回当前采样间隔。
+func (c *Collector) Interval() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interval
+}
+
+// SetInterval 热改采样间隔（设置页）。
+//
+// 必须重启 ticker 而不是"存个字段等下一轮"：time.Ticker 的周期在建好之后
+// 不可改，只改字段的话新值要等到进程重启才生效 —— 而这是设置页里最显眼
+// 的一项，用户改完会盯着仪表的跳动速度立刻确认。
+//
+// 正在跑的循环会看到 stopCh 被换掉而立刻退出，由本函数重新起一个：复用
+// SetSubscribers 已有的"新旧循环互不干扰"契约（循环只依赖自己那个 stop
+// 通道，见 loop 的注释），所以这里不需要新发明一套交接协议。
+//
+// 非法值（<=0）回落到 1s 而不是报错：调用方是设置页写进库的值，库里可能
+// 留着旧版本写下的坏数字；让采集停摆或让进程起不来都比"按 1s 跑"更糟。
+// 设置页那边仍然有枚举校验，用户改得回来。
+func (c *Collector) SetInterval(d time.Duration) {
+	if d <= 0 {
+		d = time.Second
+	}
+	c.mu.Lock()
+	changed := d != c.interval
+	c.interval = d
+	// 订阅数为 0 时不该有循环（D6：无人观看就不采样）。为改一个数字而
+	// 起一个循环，等于把"0 客户端 CPU ≈ 0%"这条非功能指标弄没了。
+	running := c.subs > 0 && c.stopCh != nil && !c.stopped
+	if changed && running {
+		old := c.stopCh
+		c.stopCh = nil
+		close(old)
+		ch := make(chan struct{})
+		c.stopCh = ch
+		c.mu.Unlock()
+		go c.loop(ch)
+		return
+	}
+	c.mu.Unlock()
+}
+
 func NewCollector(src Source, bc Broadcaster, interval time.Duration) *Collector {
 	if interval <= 0 {
 		interval = time.Second
@@ -107,7 +157,10 @@ func (c *Collector) loop(stop chan struct{}) {
 	c.liveLoops.Add(1)
 	defer c.liveLoops.Add(-1)
 
-	tick := time.NewTicker(c.interval)
+	// 间隔在锁内读一次：SetInterval 会在运行中换掉它，而 NewTicker 只吃
+	// 建表那一刻的值（这正是 SetInterval 必须重启 ticker 的原因）。
+	// 不加锁读会与写侧构成数据竞争（-race 在本机不可用，测不出来）。
+	tick := time.NewTicker(c.currentInterval())
 	defer tick.Stop()
 
 	c.tickOnce(stop)

@@ -348,3 +348,76 @@ func (s *blockingSource) Sample() (Snapshot, bool, error) {
 	<-s.release
 	return Snapshot{CPU: &CPUStat{}}, false, nil
 }
+
+// 改间隔必须重启 ticker。
+//
+// 只改字段不重启的后果：新值要等进程重启才生效。这是设置页里最显眼的一项，
+// 用户改完会**立刻盯着仪表跳动速度**确认，所以它是那种"当场就被发现"的失效
+// —— 但也正因为看起来太容易实现，最容易写成只存字段。
+func TestSetIntervalChangesTickRate(t *testing.T) {
+	src := &fakeSource{}
+	bc := &fakeBC{}
+	c := NewCollector(src, bc, 10*time.Millisecond)
+	defer c.Stop()
+	c.SetSubscribers(1)
+	waitFor(t, "第一帧", func() bool { return bc.count() >= 1 })
+
+	c.SetInterval(200 * time.Millisecond)
+
+	// 慢间隔下，固定窗口里到帧的数量应该明显少。判据用"帧数"而不是"时间戳
+	// 差"：后者在调度抖动下会误报，而 10ms vs 200ms 是 20 倍差，用数量区分
+	// 不需要卡时间。
+	base := bc.count()
+	time.Sleep(120 * time.Millisecond)
+	if got := bc.count() - base; got > 3 {
+		t.Errorf("改成 200ms 后 120ms 内还在出 %d 帧，说明 ticker 没换", got)
+	}
+}
+
+// 没有订阅者时改间隔不得把采集循环起来（D6）。
+// 为改一个数字而起一个循环，等于把"0 客户端 CPU ≈ 0%"这条指标弄没了。
+func TestSetIntervalDoesNotStartCollector(t *testing.T) {
+	src := &fakeSource{}
+	c := NewCollector(src, &fakeBC{}, 10*time.Millisecond)
+	defer c.Stop()
+	c.SetSubscribers(0)
+	c.SetInterval(20 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	if n := src.Calls(); n != 0 {
+		t.Fatalf("改间隔时起了采集循环，0 订阅也采了 %d 次", n)
+	}
+	if n := c.liveLoopCount(); n != 0 {
+		t.Fatalf("残留 %d 个循环", n)
+	}
+}
+
+// 换间隔时旧循环必须退干净（不能靠"标志位看起来停了"糊过去）。
+// 泄漏的形态：每改一次设置就多一个循环，用户来回调几次采样间隔，
+// /proc 的读取量就成倍上去，而界面上什么也看不出来。
+func TestSetIntervalDoesNotLeakLoops(t *testing.T) {
+	c := NewCollector(&fakeSource{}, &fakeBC{}, 5*time.Millisecond)
+	defer c.Stop()
+	c.SetSubscribers(1)
+	waitFor(t, "循环起来", func() bool { return c.liveLoopCount() == 1 })
+	for _, ms := range []time.Duration{5, 8, 3, 20, 5} {
+		c.SetInterval(ms * time.Millisecond)
+	}
+	// 任意时刻最多一个循环。
+	waitFor(t, "只剩一个循环", func() bool { return c.liveLoopCount() == 1 })
+	time.Sleep(30 * time.Millisecond)
+	if n := c.liveLoopCount(); n != 1 {
+		t.Fatalf("换过 5 次间隔后存活 %d 个循环", n)
+	}
+}
+
+// 非法间隔回落到 1s 而不是停摆或崩溃（库里可能留着旧版本写的坏数字）。
+func TestSetIntervalClampsInvalid(t *testing.T) {
+	c := NewCollector(&fakeSource{}, &fakeBC{}, 10*time.Millisecond)
+	defer c.Stop()
+	for _, bad := range []time.Duration{0, -1, -time.Second} {
+		c.SetInterval(bad)
+		if got := c.Interval(); got != time.Second {
+			t.Errorf("间隔 %v 应回落到 1s，得 %v", bad, got)
+		}
+	}
+}
