@@ -442,3 +442,75 @@ func TestExplicitlyClearedStringIsUnset(t *testing.T) {
 		t.Errorf("值应是空串: %q", v.Value)
 	}
 }
+
+// settings 表**同时**被 auth 用来存 password_hash（见 handlers_auth 的初始化
+// 与 0001 迁移）。All() 只能返回注册表里登记的键。
+//
+// 如果实现"优化"成把整表都返回，GET /api/settings 就会把 bcrypt 摘要发给
+// 浏览器 —— 摘要是密码的替身（拿到它就能离线爆破，也能直接拿去打某些
+// 复用摘要做凭证的实现）。这条测试钉的是"白名单不是全表"这个结构决定，
+// 而它在只剩一个 password_hash 行、看起来人畜无害的时候最容易被改写。
+func TestNeverReturnsUnregisteredRows(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.SqlDB().Exec(
+		`INSERT INTO settings(key,value,updated_at) VALUES('password_hash','$2a$12$fakefakefakefakefakefa',1)`); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, nil, nil)
+	all, err := s.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(registry) {
+		t.Fatalf("返回了 %d 项，注册表只有 %d 项", len(all), len(registry))
+	}
+	for _, v := range all {
+		if v.Key == "password_hash" {
+			t.Fatal("password_hash 绝不能出现在设置项里")
+		}
+		if strings.Contains(v.Value, "$2a$") {
+			t.Errorf("%s 的值里混进了密码摘要: %q", v.Key, v.Value)
+		}
+	}
+}
+
+// Kind 的 JSON 线格式必须是字符串。
+//
+// 这条测试存在的全部理由：Kind 曾经是 iota 枚举，而 encoding/json 对命名
+// 整数类型编码出的是**数字**（KindEnum 编成 2，实测过），前端就只能硬编码
+// 0/1/2 来选表单控件（数字框 / 下拉 / 文本框）；之后在中间插入一个新 Kind
+// 会让前后端静默错位（旧数字指向新语义）。字符串常量错位不了，且 GET 响应
+// 自带可读性。曾写过 Kind.String() 想绕开这点，但 json.Marshal 对命名整数
+// 类型根本不调 Stringer —— 那是永不调用的死代码，已删。
+//
+// 直接 marshal 一个 Kind 而不是整个 Def：Def 里没有 json tag，字段名会变；
+// 而它带着 Validate func（不可序列化），改天加个字段就会让这条测试因为
+// 完全无关的原因变红。被测性质就一个：这个类型的线格式。
+func TestKindSerializesAsString(t *testing.T) {
+	for k, want := range map[Kind]string{
+		KindInt:  `"int"`,
+		KindStr:  `"string"`,
+		KindEnum: `"enum"`,
+	} {
+		b, err := json.Marshal(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != want {
+			t.Errorf("Kind(%v) 应编码成 %s，得 %s（数字线格式会让前端在中间插项时静默错位）", k, want, b)
+		}
+	}
+	// 注册表里每一项的 Kind 都必须是上面三种之一：出现空字符串或写错的
+	// 字面量时，前端拿到一个认出的 kind 会渲染成什么完全看运气。
+	valid := map[Kind]bool{KindInt: true, KindStr: true, KindEnum: true}
+	for _, d := range Defs() {
+		if !valid[d.Kind] {
+			t.Errorf("%s 的 Kind=%q 不是已知类型", d.Key, d.Kind)
+		}
+	}
+}

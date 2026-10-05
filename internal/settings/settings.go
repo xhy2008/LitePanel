@@ -95,12 +95,19 @@ const (
 )
 
 // Kind 决定 GET 时怎么序列化、PUT 时怎么解析与校验。
-type Kind int
+//
+// 用字符串而不是 iota 枚举：encoding/json 把命名 int 类型编码成**数字**
+// （实测 KindEnum 编成 2，见下方历史说明），前端只能硬编码 0/1/2 来分支
+// 表单控件（数字框 / 下拉 / 文本框）。之后在中间插一个新 Kind，前后端就
+// 静默错位（旧的 1 变成新类型的语义）。字符串常量错位不了，且 GET 响应
+// 自带可读性。曾经写过 Kind.String() 想绕开这点，但 json.Marshal 对
+// 命名整数类型根本不调 Stringer，那是段不会被执行的死代码，已删。
+type Kind string
 
 const (
-	KindInt  Kind = iota // 带范围限制的整数
-	KindStr              // 字符串（可带校验器）
-	KindEnum             // 整数枚举（只能取 Enum 里列出的值）
+	KindInt  Kind = "int"    // 带范围限制的整数
+	KindStr  Kind = "string" // 字符串（可带校验器）
+	KindEnum Kind = "enum"   // 整数枚举（只能取 Enum 里列出的值）
 )
 
 // Def 描述一个已知设置项。
@@ -391,7 +398,7 @@ func parse(d Def, raw json.RawMessage) (string, error) {
 		}
 		return s, nil
 	}
-	return "", fmt.Errorf("内部错误：未知设置类型 %d", d.Kind)
+	return "", fmt.Errorf("内部错误：未知设置类型 %q", d.Kind)
 }
 
 // Snapshot 是一次读取的设置集合，供装配层取值（比逐个 Get 少 N 次查询）。
