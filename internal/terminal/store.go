@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"litepanel/internal/store"
@@ -26,6 +27,33 @@ const DefaultHistoryLimit = 20000
 // historyLimitOptions 是允许的档位。做成白名单而不是自由输入：100000 行
 // × 多会话对 12GB 的机器是实打实的内存压力，不能让输入框随手填个 1e9。
 var historyLimitOptions = []int{5000, DefaultHistoryLimit, 100000}
+
+// defaultHistory 是"请求没指定 history_limit 时用哪一档"。用原子而不是
+// 直接读 DefaultHistoryLimit 常量：设置页会在运行中改它，而读它的
+// normalized() 每个建新会话的请求都会走，是并发的。
+var defaultHistory = atomic.Int64{}
+
+func init() { defaultHistory.Store(DefaultHistoryLimit) }
+
+// SetDefaultHistoryLimit 设"建新会话时未指定档位的默认"（设置页热生效）。
+// 只影响之后新建的会话：历史长度是 tmux 在 new-session 时定死的，改不了
+// 已存在的会话（见 session.go 的 set -t 也只在建会话时跑一次）。
+// 非白名单值回落到 DefaultHistoryLimit 而不是报错：这个值来自库里的设置，
+// 而设置表可能被手改坏，存一个非法档位会让"新建会话"变成"历史是 0"。
+func SetDefaultHistoryLimit(n int) {
+	for _, ok := range historyLimitOptions {
+		if n == ok {
+			defaultHistory.Store(int64(n))
+			return
+		}
+	}
+	defaultHistory.Store(DefaultHistoryLimit)
+}
+
+// DefaultHistoryLimitOf 返回当前默认档位（读侧永远落在白名单内）。
+func DefaultHistoryLimitOf() int {
+	return int(defaultHistory.Load())
+}
 
 var (
 	// ErrSessionNotFound 指定 id 不存在。
@@ -87,7 +115,7 @@ func (in SessionInput) normalized() (SessionInput, error) {
 		return in, ErrTitleRequired
 	}
 	if in.HistoryLimit == 0 {
-		out.HistoryLimit = DefaultHistoryLimit
+		out.HistoryLimit = DefaultHistoryLimitOf()
 		return out, nil
 	}
 	for _, ok := range historyLimitOptions {

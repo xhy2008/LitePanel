@@ -137,6 +137,23 @@ describe('terminal store：新建', () => {
     expect(store.activeId).toBe(42);
   });
 
+  // history_limit 的取舍是设置页 term_history_limit 能否生效的唯一决定因素：
+  // 表单默认「跟随面板默认」时**不能**发这个字段，否则前端写死的数字会
+  // 永远盖住后端的设置，让它变成只存不读的摆设。
+  it('create 不带 history_limit 时请求体里也不该有它', async () => {
+    const { store, api } = boot({ post: vi.fn(async () => ({ session: row() })) });
+    await store.create({ title: 'a' });
+    const body = (api.post as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect('history_limit' in body).toBe(false);
+  });
+
+  it('create 显式指定 history_limit 时原样发出', async () => {
+    const { store, api } = boot({ post: vi.fn(async () => ({ session: row() })) });
+    await store.create({ title: 'a', history_limit: 100000 });
+    const body = (api.post as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(body.history_limit).toBe(100000);
+  });
+
   it('创建失败时不动列表、不改 active', async () => {
     const { store } = boot({ post: vi.fn(async () => { throw { message: 'tmux 没装' }; }) });
     store.sessions = [row({ id: 1 })];

@@ -32,8 +32,11 @@ export interface TermSessionInput {
 // 让 store 去"处理"它 —— 那个处理器永远不会被调用，却会让人以为
 // 会话状态是实时推送的。会话列表的新鲜度靠 load()/reload() 显式刷新。
 
+// 与后端 historyLimitOptions 白名单一一对应。
 export const HISTORY_LIMITS = [5000, 20000, 100000] as const;
-export const DEFAULT_HISTORY_LIMIT = 20000;
+// 默认档位故意不在前端硬编码：表单默认是"跟随面板默认"（history_limit
+// 省略不发），由后端的 term_history_limit 设置决定。前端写死一个数字就
+// 永远盖住那个设置，让它变成只存不读的摆设。
 
 export const termChannel = (id: number) => `term:${id}`;
 export const TERM_EVENTS_CHANNEL = 'term-events';

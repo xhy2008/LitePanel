@@ -10,7 +10,7 @@ import { useQuickCmdStore, tabBadge } from '../stores/quickcmd';
 import { useBusyWatch } from '../composables/useBusyWatch';
 import { createTerminalRuntime } from '../composables/useTerminal';
 import { useTermRuntimes, type Runtime } from '../composables/useTermRuntimes';
-import { termChannel, HISTORY_LIMITS, DEFAULT_HISTORY_LIMIT } from '../api/terminal';
+import { termChannel, HISTORY_LIMITS } from '../api/terminal';
 import { useBreakpoint } from '../composables/useBreakpoint';
 import { useRoute, useRouter } from 'vue-router';
 import { tryWs, type WsClient } from '../api/ws';
@@ -46,7 +46,14 @@ const busy = computed(() => store.loading || store.creating);
 
 // 抽屉
 const formOpen = ref(false);
-const form = ref({ title: '', cwd: '', history: DEFAULT_HISTORY_LIMIT });
+const form = ref<{ title: string; cwd: string; history: number | null }>({
+  title: '',
+  cwd: '',
+  // null = 跟随面板默认（走设置页的 term_history_limit）。这里**故意**不硬编码
+  // 一个数字：只要表单总显式发送 history_limit，设置页上那个默认值就永远
+  // 读不到，成了只存不读的摆设。
+  history: null,
+});
 // dead：从尸体标签进来的删除。确认文案必须区分 —— 对着一具尸体说
 // "正在运行的程序会被一起终止"是错的，这时唯一被删掉的是遗言记录。
 const confirmDelete = ref<{ id: number; title: string; dead?: boolean } | null>(null);
@@ -215,10 +222,10 @@ async function createSession() {
     await store.create({
       title: form.value.title,
       cwd: form.value.cwd.trim() || undefined,
-      history_limit: form.value.history,
+      history_limit: form.value.history ?? undefined,
     });
     formOpen.value = false;
-    form.value = { title: '', cwd: '', history: DEFAULT_HISTORY_LIMIT };
+    form.value = { title: '', cwd: '', history: null };
     await syncActive();
   } catch {
     /* 文案在 store.error 里，抽屉保持打开让用户改 */
@@ -420,10 +427,9 @@ onUnmounted(() => {
       /></label>
       <label class="fld"
         >历史行数
-        <select v-model.number="form.history">
-          <option v-for="n in HISTORY_LIMITS" :key="n" :value="n">
-            {{ n === DEFAULT_HISTORY_LIMIT ? `${n}（默认）` : n }}
-          </option>
+        <select v-model="form.history">
+          <option :value="null">跟随面板默认</option>
+          <option v-for="n in HISTORY_LIMITS" :key="n" :value="n">{{ n }}</option>
         </select>
       </label>
       <p v-if="store.error" class="err">{{ store.error }}</p>

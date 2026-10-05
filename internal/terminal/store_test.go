@@ -208,3 +208,39 @@ func TestTouchSessionMeta(t *testing.T) {
 		t.Fatalf("last_attached_at 未记录: %+v", got)
 	}
 }
+
+// 设置页改的是"建新会话时的默认档位"。normalized() 是唯一的漏斗，
+// 所以默认值必须从这里读——否则设置项存了也没人读。
+func TestDefaultHistoryLimitHotApply(t *testing.T) {
+	t.Cleanup(func() { SetDefaultHistoryLimit(DefaultHistoryLimit) })
+
+	// 未指定 → 用当前默认。
+	SetDefaultHistoryLimit(100000)
+	in, err := SessionInput{Title: "x"}.normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.HistoryLimit != 100000 {
+		t.Errorf("默认应跟随设置，得 %d", in.HistoryLimit)
+	}
+	// 指定了 → 用指定值，不受默认影响。
+	in, _ = SessionInput{Title: "x", HistoryLimit: 5000}.normalized()
+	if in.HistoryLimit != 5000 {
+		t.Errorf("显式值应优先，得 %d", in.HistoryLimit)
+	}
+}
+
+// 非白名单的默认值回落而不是照做。
+// 设置表里的值可能被手改坏，存一个非法档位如果照做会让"新建会话"变成
+// "历史是 0"——重连时什么都看不到。
+func TestSetDefaultHistoryLimitInvalidFallsBack(t *testing.T) {
+	t.Cleanup(func() { SetDefaultHistoryLimit(DefaultHistoryLimit) })
+	SetDefaultHistoryLimit(999999)
+	if got := DefaultHistoryLimitOf(); got != DefaultHistoryLimit {
+		t.Errorf("非白名单默认应回落到 %d，得 %d", DefaultHistoryLimit, got)
+	}
+	SetDefaultHistoryLimit(0)
+	if got := DefaultHistoryLimitOf(); got != DefaultHistoryLimit {
+		t.Errorf("0 应回落到默认（0 会让历史为空），得 %d", got)
+	}
+}
