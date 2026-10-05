@@ -346,6 +346,13 @@ func (s *Service) wake() {
 // 时刻，轮询那轮可能因为任务刚建好而回空串（→ 0），此时保留 aria2 那次
 // 查询拿到的值更准。
 func (s *Service) applyProgress(v *TaskView) {
+	// 终态行**完全不贴**快照：库里存的是完成那一刻的最终大小，而快照停在
+	// 完成前的最后一轮（aria2 一摘掉任务，轮询器就再也刷新不到它）。无条件
+	// 覆盖会做出"已完成 · 33%"这种自相矛盾的行 —— 真机实测到过。
+	// 顺带也保证了终态行的 speed 恒为 0：没在下的任务显示一个速度更难解释。
+	if State(v.State).IsTerminal() {
+		return
+	}
 	p, ok := s.prog(v.GID)
 	if !ok {
 		return

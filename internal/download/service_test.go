@@ -680,3 +680,38 @@ func TestEmitToleratesNilHooks(t *testing.T) {
 	s.ViaWS = func(Event) {}
 	s.emit(Event{Kind: EventStart})
 }
+
+// 终态记录不得被陈旧的轮询快照覆盖大小。
+//
+// 真机实测到的（dev/a2probe，真 aria2c 1.37.0）：一个 3MB 文件下载完成后，
+// 历史行显示 state=complete 而 done=1048576/3145728（33%）。原因是完成事件
+// 落库时写的是**最终**大小，而轮询器上一轮的快照停在 33%（aria2 已经把任务
+// 从 tellActive 摘掉，那一轮之后再也刷新不到它），applyProgress 无条件覆盖就
+// 把最终值刷回了中间值。
+//
+// 用户看到的就是"已完成 · 33%"这种自相矛盾的行 —— 而它比"完成 100%"更让人
+// 怀疑文件是坏的（设计里下载页的核心卖点正是进度与大小的可信度）。
+func TestTerminalSizesNotOverwrittenByStaleProgress(t *testing.T) {
+	e := newSvcEnv(t)
+	e.submit(t, "0xa", "a.bin")
+	// 轮询器停在 33%（完成前的最后一轮）。
+	e.svc.SetProgress([]Progress{{GID: "0xa", TotalBytes: 3145728, DoneBytes: 1048576, Speed: 99}})
+	// 完成事件落的是最终大小。
+	if err := e.tasks.SetTerminal(context.Background(), "0xa", StateComplete, "", 3145728, 3145728); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := e.svc.Tasks(context.Background())
+	if len(view) != 1 {
+		t.Fatalf("got %d", len(view))
+	}
+	got := view[0]
+	if got.State != "complete" {
+		t.Fatalf("state got %s", got.State)
+	}
+	if got.DoneBytes != 3145728 || got.TotalBytes != 3145728 {
+		t.Errorf("终态大小必须以库为准，不能被陈旧快照覆盖: got %d/%d", got.DoneBytes, got.TotalBytes)
+	}
+	if got.Speed != 0 {
+		t.Errorf("已完成的任务速度应为 0，不能显示上一轮的 %d", got.Speed)
+	}
+}
