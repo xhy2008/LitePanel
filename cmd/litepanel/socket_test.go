@@ -33,6 +33,10 @@ func TestMain(m *testing.M) {
 
 	exec.Command("tmux", "kill-server").Run() // 只关私有 socket 上的
 	os.RemoveAll(dir)
+	if binRoot != "" {
+		// zero_log_test.go 编译的被测二进制缓存（没有跑那些用例时为空）。
+		os.RemoveAll(binRoot)
+	}
 	os.Exit(code)
 }
 
