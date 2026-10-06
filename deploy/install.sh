@@ -141,7 +141,10 @@ if [ ! -f "$ETC/config.toml" ]; then
         # SAN 覆盖面：回环 + 本机 tailscale IPv4。监听地址换了（比如手改
         # 0.0.0.0 走局域网 IP）证书就对不上，那是 --tls 的一次性便利边界，
         # README 让人换正式证书，脚本不假装能追平所有变化。
+        # SAN 必须含局域网 IP：只签 loopback+tailscale 的话，LAN 地址访问
+        # 证书名对不上又被浏览器拦（真机坑）。hostname -I 列出全部本机 IPv4。
         SANS="IP:127.0.0.1,IP:::1,DNS:localhost"
+        for ip in $(hostname -I 2>/dev/null); do SANS="$SANS,IP:$ip"; done
         if command -v tailscale >/dev/null; then
             TSIP="$(tailscale ip -4 2>/dev/null | head -1)"
             [ -n "$TSIP" ] && SANS="$SANS,IP:$TSIP"
@@ -181,6 +184,43 @@ else
         echo "警告：config.toml 里的 aria2_rpc_secret 与 $ETC/aria2.env 不一致 —— 下载会报未授权。二选一改成一致后 systemctl restart litepanel aria2" >&2
     fi
 fi
+
+# ---- 启动门禁预检（真机三连坑：拒启被误读成防火墙）----
+# 浏览器"拒绝连接"十有八九不是网络问题，是面板被自己的安全门禁拒之门外、
+# 循环重启中（真机原话："监听地址设置成0.0.0.0会拒绝局域网访问"——实际是
+# 面板压根没活着）。与其让 systemd 每 2 秒撞一次墙再翻 journal，不如装前
+# 就把这三条拦下并给修复命令。门禁本身在 config.Validate，这里只做脚本
+# 能看懂的部分（listen/TLS/证书文件/密码是否已设），不是完整解析器。
+preflight_config() {
+    local f="$ETC/config.toml" listen enabled cert key db bad=0
+    listen="$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$f" | head -1)"
+    enabled="$(sed -n 's/^enabled[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$f" | head -1 | tr -d '[:space:]')"
+    cert="$(sed -n 's/^cert_file[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$f" | head -1)"
+    key="$(sed -n 's/^key_file[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$f" | head -1)"
+    if { [ "$listen" = "0.0.0.0" ] || [ "$listen" = "::" ]; } && [ "$enabled" != "true" ]; then
+        echo "门禁：listen=$listen 但未启用 TLS，面板会拒绝启动（设计 4.1）。修复：给 [tls] 配证书（README 的 openssl 命令），或改回 listen = \"tailscale\"。" >&2
+        bad=1
+    fi
+    if [ "$enabled" = "true" ]; then
+        # -s 而非 -f：cert_file="" 或空文件与不存在同罪，ListenAndServeTLS 全拒。
+        if [ ! -s "$cert" ] || [ ! -s "$key" ]; then
+            echo "门禁：tls enabled=true 但证书/私钥缺失或为空（cert=$cert key=$key）。一条生成含本机所有 IP 的自签证书：" >&2
+            echo "  go run $REPO/deploy/mkcert.go /etc/litepanel/tls  # 或 README『HTTPS』里的 openssl 命令" >&2
+            bad=1
+        fi
+    fi
+    # 0.0.0.0 还要求已设密码。密码在 bcrypt 库里读不出明文，但"设过没有"
+    # 查得到；没有 sqlite3 时放手交给面板自己的报错，不强求预检全覆盖。
+    db="$(sed -n 's/^db_path[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$f" | head -1)"
+    if { [ "$listen" = "0.0.0.0" ] || [ "$listen" = "::" ]; } && command -v sqlite3 >/dev/null && [ -f "$db" ]; then
+        if ! sqlite3 "$db" "select 1 from settings where key='password_hash' limit 1" 2>/dev/null | grep -q 1; then
+            echo "门禁：listen=$listen 但数据库里还没设过密码——首次部署必须先走 tailscale/127.0.0.1 登录改密，之后再开 0.0.0.0（这是门禁的本意：防裸奔，不是拦初见）。" >&2
+            bad=1
+        fi
+    fi
+    return "$bad"
+}
+preflight_config || { echo "预检未通过，未启动任何服务（其余安装动作已完成，可修复配置后重跑）。" >&2; exit 1; }
 
 install -Dm644 "$REPO/deploy/litepanel.service" /etc/systemd/system/litepanel.service
 install -Dm644 "$REPO/deploy/aria2.service" /etc/systemd/system/aria2.service

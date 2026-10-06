@@ -16,3 +16,7 @@ web/coverage/
 
 # 杂项
 .scratch/
+
+# pi 会话日志与误存响应
+/pi.jsonl
+/JSON

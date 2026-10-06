@@ -42,23 +42,48 @@ journalctl -u litepanel -n 5      # 找到"一次性初始密码"那行
 
 登录后立即改密（面板会强制引导）。密码之后以数据库为准。
 
+### 局域网 / 全接口访问
+
+想从局域网（或任意网卡）访问，把 `listen` 改成 `0.0.0.0` —— 它包含
+tailscale0，所以局域网 IP 与 tailscale IP 同时可达，不必二选一：
+
+```toml
+listen = "0.0.0.0"
+port = 9530
+```
+
+**但 `0.0.0.0` 会触发安全门禁**（设计 4.1），面板要求同时满足，缺一拒绝
+启动：① 已设过密码；② 启用 TLS 且证书/私钥文件真实存在。`install.sh`
+会在启动服务前预检这三条并把修复命令打出来——**别忽略它**，直接跑
+下去只会让 systemd 反复重启、浏览器报"拒绝连接"。
+
+首台部署的正确顺序：先用默认 `listen = "tailscale"` 起面板、登录改密码，
+再回来配 TLS、把 listen 改 `0.0.0.0`。门禁的本意是防"运行中的面板
+不小心裸奔"，从没打算拦第一次开机。
+
 ### HTTPS
 
-监听 `0.0.0.0` 必须已设密码且启用 TLS，否则面板拒绝启动（原因看
-journalctl）。默认 `listen = "tailscale"`：自动绑 tailscale IPv4，探测不到
-回落 `127.0.0.1`——tailnet 内部访问可以不折腾证书。
-
-要证书的话两条路任选，面板只从 `cert_file`/`key_file` 读，不会自动签发：
+默认 `listen = "tailscale"` 时可以不折腾证书（tailnet 内部访问走明文即可）。
+要证书的话面板只从 `cert_file`/`key_file` 读，不会自动签发，两条路任选：
 
 ```bash
-# 自签（局域网 IP 直连够用；浏览器会警告一次）
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -keyout /etc/litepanel/key.pem -out /etc/litepanel/cert.pem \
-  -days 3650 -nodes -subj "/CN=lit" \
-  -addext "subjectAltName=IP:<服务器IP>"
+# A. 项目自带生成器：把本机所有 IP（含局域网 IP）自动签进 SAN，
+#    免手填 IP、不怕漏。输出到 /etc/litepanel/tls/{cert,key}.pem
+sudo go run deploy/mkcert.go /etc/litepanel/tls
 
-# 或 tailscale cert 签好后把路径填进 config.toml 的 [tls]
+# B. openssl 手签（SAN 必须含要访问的每一个 IP，逗号分隔；
+#    占位符要换成真地址，写了假的会 "bad ip address" 报错）
+sudo mkdir -p /etc/litepanel/tls
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout /etc/litepanel/tls/key.pem -out /etc/litepanel/tls/cert.pem \
+  -days 3650 -nodes -subj "/CN=litepanel" \
+  -addext "subjectAltName=IP:127.0.0.1,IP:::1,DNS:localhost,IP:<服务器局域网IP>"
+sudo chmod 600 /etc/litepanel/tls/key.pem
 ```
+
+签完把 `[tls]` 的 `enabled=true` + 两个路径填进 config，`systemctl restart
+litepanel`。自签证书浏览器会警告一次（点"继续访问"）；换 IP 段要重签，
+建议路由器给服务器做 DHCP 静态绑定。
 
 ### 升级
 
@@ -85,6 +110,22 @@ curl -sk https://<地址>:9530/ -o /dev/null -w '%{http_code}\n'
 make smoke PANEL_PASS=<改后的密码>          # 启动路径端到端
 make smoke-restart                          # kill -9 后 tmux 会话存活（D5）
 ```
+
+### 排障速查（真机踩过的坑）
+
+先看状态再看日志，`journalctl -u litepanel -n 10` 里一行 `litepanel: `
+开头的摘要就是启动失败的全部原因（R4：启动失败一定有一句人话）。
+
+| 症状 | 真实原因 | 修法 |
+|---|---|---|
+| 浏览器"拒绝连接"，且只在 `listen=0.0.0.0` 时 | 不是防火墙！是面板被安全门禁拒之门外、根本没启动（缺密码或 TLS）。绑具体 IP 能通就是因为没触发门禁 | `journalctl -u litepanel`，多半是 TLS；按上面 HTTPS 节配证书 |
+| aria2 反复重启，日志 `Failed to open … session.txt` | 单元已自备该文件；若仍报错是旧单元未更新 | `git pull && sudo ./deploy/install.sh` |
+| 下载页报"失败/未授权"，但 aria2 的 RPC 手动 curl 正常 | 面板 config 里没 `aria2_rpc_secret`（缺=按无 token 发，被 aria2 拒） | `printf '\naria2_rpc_secret = "%s"\n' "$(sed -n 's/^A2_RPC_SECRET=//p' /etc/litepanel/aria2.env)" >> /etc/litepanel/config.toml && systemctl restart litepanel` |
+| 首启不知道密码 | 一次性密码不落文件，只打一次 journald | `journalctl -u litepanel -n 5` |
+| 面板重启后自己托管的服务全停了 | 设计 R1 既知行为（command 型服务随面板进程组退出）；systemd 型与 tmux 终端不受影响 | 服务页手动拉起 |
+
+`install.sh` 已能自动拦前两条（启动门禁预检）与第三条（secret 缺失/分家
+告警）；报错里的修复命令可直接复制。
 
 ## 开发
 
