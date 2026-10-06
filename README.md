@@ -21,8 +21,14 @@ sudo ./deploy/install.sh        # 也可 make install
 - **已有配置绝不被覆盖**：`/etc/litepanel/config.toml` 只在缺失时从模板生成
 - **aria2 secret 只生成一次**（`/etc/litepanel/aria2.env`，0600）：换 secret
   会让面板里的值与 aria2 实际值分家，之后每个下载调用都回"未授权"
-- 下载目录自动选**可用容量最大的挂载点**下的 `downloads/`，写进 env 文件；
-  面板（设置页预填）与 aria2（`--dir`）读同一份，两边不会漂
+- 下载目录：**首次部署时询问**（回车用 `/var/lib/litepanel/downloads`；
+  非交互安装自动用默认值），写入 env 文件；面板（设置页预填）与 aria2
+  （`--dir`）读同一份，两边不会漂；之后改它在设置页热改，或由你同时改
+  env + 重启两个服务
+- `--tls`：首次部署时顺带自签一张 TLS 证书（SAN 含 127.0.0.1 +
+  本机 tailscale IP）；对已有部署不生效
+- `--uninstall`：停服务、删单元与二进制，**配置与数据默认保留**；加
+  `--purge-data` 才连 `/etc/litepanel` 与 `/var/lib/litepanel` 一起删
 - `systemctl enable` 两个服务：面板与 aria2 都开机自启（aria2 由 systemd
   托管，面板只连它的 RPC，永远不负责拉起它）
 
