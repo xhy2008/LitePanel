@@ -169,8 +169,15 @@ else
     # secret 一致性只检不修：config 与 env 分家时下载功能整个坏且症状
     # 迷惑（"未授权"），而擅自改 config 会盖掉用户可能的有意改动。报出来
     # 让用户自己定夺。
-    CFG_SECRET="$(sed -n 's/^aria2_rpc_secret = "\(.*\)"/\1/p' "$ETC/config.toml")"
-    if [ -n "$CFG_SECRET" ] && [ "$CFG_SECRET" != "$SECRET" ]; then
+    # 注释行也要排除：有人会把旧 secret 注释掉留在文件里，sed 若把
+    # `#aria2_rpc_secret = "…"` 读进来会误报"不一致"。
+    CFG_SECRET="$(sed -n 's/^[[:space:]]*aria2_rpc_secret = "\(.*\)"/\1/p' "$ETC/config.toml" | head -1)"
+    if [ -z "$CFG_SECRET" ]; then
+        # 缺键与值分家是同一场事故（缺=按无 token 发，全部被 aria2 拒），
+        # 只在"值不一致"时报警会把这种更常见的形态漏掉——真机栽过一次。
+        echo "警告：config.toml 里没有 aria2_rpc_secret（或值为空）—— 下载会报未授权。补上：" >&2
+        echo "  printf '\\naria2_rpc_secret = \\"%s\\"\\n' \"\$(sed -n 's/^A2_RPC_SECRET=//p' $ETC/aria2.env)\" >> $ETC/config.toml && systemctl restart litepanel" >&2
+    elif [ "$CFG_SECRET" != "$SECRET" ]; then
         echo "警告：config.toml 里的 aria2_rpc_secret 与 $ETC/aria2.env 不一致 —— 下载会报未授权。二选一改成一致后 systemctl restart litepanel aria2" >&2
     fi
 fi
