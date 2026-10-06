@@ -10,11 +10,17 @@ Wants=network-online.target
 User=root
 Type=simple
 # rpc-secret 与下载目录都不写进单元文件（单元文件 world-readable，还进
-# git；目录是 install.sh 按"最大可用容量挂载点"探测出来的机器值）：
+# git；目录是首次部署时问过用户的机器值）：
 # 由 install.sh 生成到 0600 的 env 文件，Exec* 里 systemd 展开。
 # 单一来源同时喂面板的 aria2_download_dir 预填，两边不可能漂移。
 EnvironmentFile=/etc/litepanel/aria2.env
+# 目录与 session 文件都必须在这里备好：aria2c（1.37 实测）对不存在的
+# --input-file 直接抛异常退出，Restart=always 只会让它每 2 秒再撞一次。
+# 两条直令而不是 sh -c 包装：${A2_DIR} 在引号里的 systemd 展开语义有
+# 歧义，能不经 shell 就不要经 shell（也少一个 /bin/sh 依赖）。session
+# 路径是固定值，touch 不需要任何变量展开；权限交给 UMask=0077。
 ExecStartPre=/usr/bin/install -d -m 0700 ${A2_DIR} /var/lib/litepanel/aria2
+ExecStartPre=/usr/bin/touch /var/lib/litepanel/aria2/session.txt
 ExecStart=/usr/bin/aria2c \
     --enable-rpc \
     --rpc-listen-port=6800 \
